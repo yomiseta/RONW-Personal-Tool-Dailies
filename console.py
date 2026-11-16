@@ -1,4 +1,6 @@
+import os
 import queue
+import threading
 import time
 import tkinter as tk
 from tkinter import filedialog
@@ -7,6 +9,8 @@ import screen
 import settings
 import skin
 import theme
+import winutil
+import launcher
 
 IDLE, RUNNING, PAUSED = "IDLE", "RUNNING", "PAUSED"
 
@@ -49,6 +53,8 @@ class Console:
         self.h = bottom - top
         self.top_h = self.h // 2
         self.log_h = self.h - self.top_h
+        # The space to the right of the console (x, y, width, height) for the game windows.
+        self.game_area = (left + self.w, top, (right - left) - self.w, self.h)
 
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -134,14 +140,64 @@ class Console:
 
     def on_start_stop(self):
         if self.state == IDLE:
+            count = winutil.minimize_all(skip_pid=os.getpid())
+            self.log(f"Minimized {count} window(s).", "INFO")
+            if not self.open_launcher():
+                return  # could not open it, stay IDLE
             self.state = RUNNING
             self.log("Automation STARTED.", "OK")
-            # Later: start the bot here (in a thread).
+            threading.Thread(target=self._arrange_launcher, daemon=True).start()
         else:
             self.state = IDLE
             self.log("Automation STOPPED.", "WARN")
             # Later: tell the bot to stop here.
         self._refresh_buttons()
+
+    def open_launcher(self):
+        """Opens the RONW launcher. Returns True if it is running or was started."""
+        if launcher.is_running():
+            self.log("RONW is already running. Not opening a second one.", "INFO")
+            return True
+
+        path = self.settings.get("launcher_path", "")
+        if not path:
+            self.log("Select the RONW launcher .exe (first time only)...", "INFO")
+            path = filedialog.askopenfilename(
+                title="Select the Ragnarok The New World launcher",
+                filetypes=[("Programs", "*.exe"), ("All files", "*.*")])
+            if not path:
+                self.log("No launcher selected. Not started.", "WARN")
+                return False
+            self.settings["launcher_path"] = path
+            settings.save(self.settings)
+
+        try:
+            launcher.start(path)
+        except OSError as err:
+            self.log(f"Could not open the launcher: {err}", "ERROR")
+            self.settings["launcher_path"] = ""  # ask again next time
+            settings.save(self.settings)
+            return False
+
+        self.log("Launcher opened. Waiting for it to appear...", "OK")
+        return True
+    
+    def _arrange_launcher(self):
+        """Runs in a background thread: waits for the launcher window, then fits it to the right area."""
+        x, y, w, h = self.game_area
+        self.log("Waiting for the launcher window...", "INFO")
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            if self.state == IDLE:  # user pressed STOP
+                return
+            hwnd = winutil.find_window(launcher.PROCESS_NAME, "Chrome_WidgetWin_0", "ragnarok")
+            if hwnd:
+                time.sleep(1.0)  # let the window finish drawing
+                fx, fy, fw, fh = winutil.fit_window(hwnd, x, y, w, h)
+                self.log(f"Launcher placed at x={fx} y={fy} size={fw}x{fh}.", "OK")
+                return
+            time.sleep(0.5)
+        self.log("The launcher window did not appear within 60 seconds.", "ERROR")    
 
     def on_pause(self):
         if self.state == RUNNING:
