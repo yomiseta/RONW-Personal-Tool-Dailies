@@ -1,6 +1,7 @@
+"""Entry point: starts the console window."""
 import screen
 
-screen.enable_dpi_awareness()  # must happen before any window exists
+screen.enable_dpi_awareness()  # must run before any window is created
 
 from console import Console  # noqa: E402
 

@@ -1,22 +1,21 @@
-import os
+"""The console window: control buttons, skin, log and the ACTION status bar."""
 import queue
-import threading
 import time
 import tkinter as tk
 from tkinter import filedialog
 
+import actions
 import screen
 import settings
 import skin
 import theme
-import winutil
-import launcher
+from automation import Automation
 
 IDLE, RUNNING, PAUSED = "IDLE", "RUNNING", "PAUSED"
 
 
 class GameButton(tk.Label):
-    """A flat neon button (tk.Button ignores colours on Windows, so we use a Label)."""
+    """A flat neon button. tk.Button ignores custom colours on Windows, so a Label is used instead."""
 
     def __init__(self, parent, text, command, color):
         super().__init__(parent, text=text, font=theme.FONT_BTN, fg=color, bg=theme.BG,
@@ -41,19 +40,23 @@ class GameButton(tk.Label):
 
 
 class Console:
+    BAR_H = 44  # height of the ACTION status bar at the bottom edge
+
     def __init__(self):
         self.root = tk.Tk()
         self.state = IDLE
+        self.stopping = False
+        self.automation = None
         self.settings = settings.load()
-        self.log_queue = queue.Queue()
+        self.ui_queue = queue.Queue()  # messages from the worker thread to the GUI thread
 
-        # Left quarter of the work area (the screen minus the taskbar).
+        # The console takes the left quarter of the work area (the screen minus the taskbar).
         left, top, right, bottom = screen.get_work_area()
         self.w = (right - left) // 4
         self.h = bottom - top
         self.top_h = self.h // 2
-        self.log_h = self.h - self.top_h
-        # The space to the right of the console (x, y, width, height) for the game windows.
+        self.log_h = self.h - self.top_h - self.BAR_H
+        # Everything to the right of the console is reserved for the launcher and the game: (x, y, w, h).
         self.game_area = (left + self.w, top, (right - left) - self.w, self.h)
 
         self.root.overrideredirect(True)
@@ -63,8 +66,9 @@ class Console:
 
         self._build_top()
         self._build_log()
+        self._build_action_bar()
         self._refresh_buttons()
-        self.root.after(50, self._drain_log)
+        self.root.after(50, self._drain_queue)
         self.log("Console ready. Press START.", "OK")
 
     # ---------- layout ----------
@@ -100,115 +104,132 @@ class Console:
             self.log_text.tag_config(level, foreground=color)
         self.log_text.tag_config("TIME", foreground=theme.MUTED)
 
+    def _build_action_bar(self):
+        """The permanent ACTION bar along the bottom edge of the console."""
+        bar = tk.Frame(self.root, bg=theme.BG, highlightthickness=2, highlightbackground=theme.MAGENTA)
+        bar.place(x=0, y=self.h - self.BAR_H, width=self.w, height=self.BAR_H)
+        tk.Label(bar, text="ACTION", font=theme.FONT_STATUS, fg=theme.MUTED, bg=theme.BG).pack(
+            side="left", padx=(10, 8))
+        self.action_label = tk.Label(bar, text=actions.IDLE, font=theme.FONT_BTN, fg=theme.CYAN,
+                                     bg=theme.BG, anchor="w")
+        self.action_label.pack(side="left", fill="x", expand=True)
+
     def _apply_skin(self):
-        self.skin_image = skin.load_skin(self.settings["skin"], (self.w, self.top_h))  # keep a reference!
+        # Tk discards an image that has no Python reference, so it is stored on self.
+        self.skin_image = skin.load_skin(self.settings["skin"], (self.w, self.top_h))
         if hasattr(self, "skin_item"):
             self.canvas.itemconfig(self.skin_item, image=self.skin_image)
         else:
             self.skin_item = self.canvas.create_image(0, 0, image=self.skin_image, anchor="nw")
             self.canvas.tag_lower(self.skin_item)
 
-    # ---------- logging (safe to call from any thread) ----------
+    # ---------- messages from any thread ----------
     def log(self, message, level="INFO"):
-        self.log_queue.put((time.strftime("%H:%M:%S"), level, message))
+        """Adds a line to the log. Safe to call from any thread."""
+        self.ui_queue.put(("log", time.strftime("%H:%M:%S"), level, message))
 
-    def _drain_log(self):
+    def set_action(self, text):
+        """Changes the text of the ACTION bar. Safe to call from any thread."""
+        self.ui_queue.put(("action", text))
+
+    def _drain_queue(self):
+        """Applies queued updates on the GUI thread. Tk widgets must only be touched from that thread."""
         try:
             while True:
-                stamp, level, message = self.log_queue.get_nowait()
-                self.log_text.config(state="normal")
-                self.log_text.insert("end", f"[{stamp}] ", "TIME")
-                self.log_text.insert("end", f"{message}\n", level)
-                lines = int(self.log_text.index("end-1c").split(".")[0])
-                if lines > 1000:
-                    self.log_text.delete("1.0", f"{lines - 1000}.0")
-                self.log_text.config(state="disabled")
-                self.log_text.see("end")
-        except queue.Empty:
-            pass
-        self.root.after(50, self._drain_log)
+                try:
+                    item = self.ui_queue.get_nowait()
+                except queue.Empty:
+                    break
+                self._handle(item)
+        finally:
+            self.root.after(50, self._drain_queue)
+
+    def _handle(self, item):
+        kind = item[0]
+        if kind == "log":
+            _, stamp, level, message = item
+            self.log_text.config(state="normal")
+            self.log_text.insert("end", f"[{stamp}] ", "TIME")
+            self.log_text.insert("end", f"{message}\n", level)
+            lines = int(self.log_text.index("end-1c").split(".")[0])
+            if lines > 1000:  # keep the log bounded during long runs
+                self.log_text.delete("1.0", f"{lines - 1000}.0")
+            self.log_text.config(state="disabled")
+            self.log_text.see("end")
+        elif kind == "action":
+            self.action_label.config(text=item[1])
+        elif kind == "done":  # the worker finished, failed or was stopped
+            self.state = IDLE
+            self.stopping = False
+            self.automation = None
+            self._refresh_buttons()
 
     # ---------- buttons ----------
     def _refresh_buttons(self):
         running = self.state != IDLE
-        self.btn_start.set_text("STOP" if running else "START")
+        if self.stopping:
+            self.btn_start.set_text("STOPPING...")
+        else:
+            self.btn_start.set_text("STOP" if running else "START")
+        self.btn_start.set_enabled(not self.stopping)
         self.btn_pause.set_text("UNPAUSE" if self.state == PAUSED else "PAUSE")
-        self.btn_pause.set_enabled(running)
+        self.btn_pause.set_enabled(running and not self.stopping)
         text, color = {IDLE: ("IDLE", theme.MUTED), RUNNING: ("RUNNING", theme.GREEN),
                        PAUSED: ("PAUSED", theme.YELLOW)}[self.state]
         self.canvas.itemconfig(self.status_id, text=f"STATUS: {text}", fill=color)
 
+    def _ensure_launcher_path(self):
+        """Returns the saved launcher executable and asks for it on first use. None if the user cancels."""
+        path = self.settings.get("launcher_path", "")
+        if path:
+            return path
+        self.log("Select the RONW launcher .exe (first time only)...", "INFO")
+        path = filedialog.askopenfilename(
+            title="Select the Ragnarok The New World launcher",
+            filetypes=[("Programs", "*.exe"), ("All files", "*.*")])
+        if not path:
+            self.log("No launcher selected. Not started.", "WARN")
+            return None
+        self.settings["launcher_path"] = path
+        settings.save(self.settings)
+        return path
+
     def on_start_stop(self):
+        if self.stopping:
+            return
         if self.state == IDLE:
-            count = winutil.minimize_all(skip_pid=os.getpid())
-            self.log(f"Minimized {count} window(s).", "INFO")
-            if not self.open_launcher():
-                return  # could not open it, stay IDLE
+            path = self._ensure_launcher_path()
+            if not path:
+                return
+            self.automation = Automation(
+                log=self.log, set_action=self.set_action,
+                on_done=lambda: self.ui_queue.put(("done",)),
+                launcher_path=path, area=self.game_area)
             self.state = RUNNING
             self.log("Automation STARTED.", "OK")
-            threading.Thread(target=self._arrange_launcher, daemon=True).start()
+            self.automation.start()
         else:
-            self.state = IDLE
-            self.log("Automation STOPPED.", "WARN")
-            # Later: tell the bot to stop here.
+            self.stopping = True
+            self.log("Stopping...", "WARN")
+            self.automation.stop()
         self._refresh_buttons()
 
-    def open_launcher(self):
-        """Opens the RONW launcher. Returns True if it is running or was started."""
-        if launcher.is_running():
-            self.log("RONW is already running. Not opening a second one.", "INFO")
-            return True
-
-        path = self.settings.get("launcher_path", "")
-        if not path:
-            self.log("Select the RONW launcher .exe (first time only)...", "INFO")
-            path = filedialog.askopenfilename(
-                title="Select the Ragnarok The New World launcher",
-                filetypes=[("Programs", "*.exe"), ("All files", "*.*")])
-            if not path:
-                self.log("No launcher selected. Not started.", "WARN")
-                return False
-            self.settings["launcher_path"] = path
-            settings.save(self.settings)
-
-        try:
-            launcher.start(path)
-        except OSError as err:
-            self.log(f"Could not open the launcher: {err}", "ERROR")
-            self.settings["launcher_path"] = ""  # ask again next time
-            settings.save(self.settings)
-            return False
-
-        self.log("Launcher opened. Waiting for it to appear...", "OK")
-        return True
-    
-    def _arrange_launcher(self):
-        """Runs in a background thread: waits for the launcher window, then fits it to the right area."""
-        x, y, w, h = self.game_area
-        self.log("Waiting for the launcher window...", "INFO")
-        deadline = time.time() + 60
-        while time.time() < deadline:
-            if self.state == IDLE:  # user pressed STOP
-                return
-            hwnd = winutil.find_window(launcher.PROCESS_NAME, "Chrome_WidgetWin_0", "ragnarok")
-            if hwnd:
-                time.sleep(1.0)  # let the window finish drawing
-                fx, fy, fw, fh = winutil.fit_window(hwnd, x, y, w, h)
-                self.log(f"Launcher placed at x={fx} y={fy} size={fw}x{fh}.", "OK")
-                return
-            time.sleep(0.5)
-        self.log("The launcher window did not appear within 60 seconds.", "ERROR")    
-
     def on_pause(self):
+        if self.stopping or self.automation is None:
+            return
         if self.state == RUNNING:
             self.state = PAUSED
-            self.log("Paused.", "WARN")
+            self.automation.pause()
+            self.log("Paused. It stops at the next step.", "WARN")
         elif self.state == PAUSED:
             self.state = RUNNING
+            self.automation.resume()
             self.log("Resumed.", "OK")
         self._refresh_buttons()
 
     def on_quit(self):
+        if self.automation:
+            self.automation.stop()
         self.root.destroy()
 
     def on_change_skin(self):

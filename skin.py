@@ -1,12 +1,15 @@
+"""Loads the console skin (background image) and generates a default one when none is available."""
 from pathlib import Path
+
 from PIL import Image, ImageDraw, ImageOps, ImageTk
+
 import theme
 
 BASE = Path(__file__).parent
 
 
 def make_default_skin(path, size=(480, 540)):
-    """Draws a dark gradient + grid + neon border, so the app works without any image."""
+    """Draws a dark gradient with a grid and a neon border, so the app never depends on an external image."""
     w, h = size
     img = Image.new("RGB", size)
     d = ImageDraw.Draw(img)
@@ -25,7 +28,7 @@ def make_default_skin(path, size=(480, 540)):
 
 
 def load_skin(skin_path, size):
-    """Returns a PhotoImage of exactly `size`. Falls back to the default skin on any problem."""
+    """Returns a PhotoImage of exactly `size`. Falls back to the default skin if the file cannot be read."""
     p = Path(skin_path)
     if not p.is_absolute():
         p = BASE / p
@@ -36,5 +39,5 @@ def load_skin(skin_path, size):
         if not default.exists():
             make_default_skin(default)
         img = Image.open(default).convert("RGB")
-    img = ImageOps.fit(img, size, Image.LANCZOS)  # crop-to-fill, no stretching
+    img = ImageOps.fit(img, size, Image.LANCZOS)  # crop to fill instead of stretching
     return ImageTk.PhotoImage(img)
