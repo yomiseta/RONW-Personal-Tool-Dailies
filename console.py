@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import filedialog
 
 import actions
+import picker
 import screen
 import settings
 import skin
@@ -70,6 +71,8 @@ class Console:
         self._refresh_buttons()
         self.root.after(50, self._drain_queue)
         self.log("Console ready. Press START.", "OK")
+        self.picker = picker.Picker(self.root, self.log, lambda: self.state != IDLE)
+        self.picker.start()
 
     # ---------- layout ----------
     def _build_top(self):
