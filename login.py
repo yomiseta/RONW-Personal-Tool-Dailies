@@ -16,7 +16,6 @@ from pathlib import Path
 
 from PIL import Image
 
-import actions
 import game
 import inputs
 import vision
@@ -271,7 +270,6 @@ def run(bot):
     """Runs the complete login flow for the first account in Accounts.ini."""
     account, password = load_account()
     _check_files()
-    bot.set_action(actions.logging_in(account))
     bot.log(f"Account to use: {account}")
 
     _wait_launcher_ready(bot)

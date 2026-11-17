@@ -12,7 +12,12 @@ import actions
 import launcher
 import login
 import winutil
+import goals
 from errors import Stopped, StepFailed
+
+
+GOAL_TIMEOUT = 900     # seconds one goal may take before the bot gives up
+MAX_FAILURES = 3       # failed passes in a row before the goal is abandoned
 
 
 class Automation:
@@ -26,6 +31,7 @@ class Automation:
         self._resume = threading.Event()
         self._resume.set()
         self._thread = None
+        self.action = actions.IDLE      # the current goal; the loops below run while it stays unchanged
 
     # ----- control, called from the GUI thread -----
     def start(self):
@@ -82,6 +88,36 @@ class Automation:
             if time.monotonic() >= end:
                 return None
             end += self.sleep(interval)
+    
+
+    # ----- goals -----
+    def _set_goal(self, title):
+        self.action = title
+        self.set_action(title)
+
+    def pursue(self, goal):
+        """Works on one goal until it is verified as done.
+        The goal is re-checked from the screen on every pass, so the bot never assumes a step worked."""
+        self._set_goal(goal.title)
+        started = time.monotonic()
+        failures = 0
+        while self.action == goal.title:
+            started += self.checkpoint()
+            if goal.is_done(self):
+                self.log(f"Goal done: {goal.title}", "OK")
+                return
+            if time.monotonic() - started > GOAL_TIMEOUT:
+                raise StepFailed(f"Goal not reached in time: {goal.title}")
+            try:
+                goal.step(self)
+                failures = 0
+            except StepFailed as err:
+                failures += 1
+                if failures >= MAX_FAILURES:
+                    raise
+                self.log(f"{err} Trying again ({failures}/{MAX_FAILURES - 1})...", "WARN")
+                self.sleep(2.0)
+
 
     # ----- the job itself -----
     def _run(self):
@@ -102,5 +138,7 @@ class Automation:
         count = winutil.minimize_all(skip_pid=os.getpid())
         self.log(f"Minimized {count} window(s).")
         launcher.open_and_arrange(self, self.launcher_path)
-        login.run(self)
-        self.log("Login finished. Stopping here so you can test.", "OK")
+        account, _ = login.load_account()
+        self.pursue(goals.LoginGoal(account))
+        self.log("Next goals (mails, events, Peer Arena, Quest Board, Guild Dailies) are not built yet. "
+                 "Stopping here so you can test.", "OK")

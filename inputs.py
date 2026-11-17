@@ -45,7 +45,7 @@ user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
 INPUT_MOUSE, INPUT_KEYBOARD = 0, 1
 MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
 KEYEVENTF_KEYUP, KEYEVENTF_UNICODE = 0x0002, 0x0004
-VK_CONTROL, VK_A, VK_DELETE = 0x11, 0x41, 0x2E
+VK_CONTROL, VK_A, VK_DELETE, VK_ESCAPE = 0x11, 0x41, 0x2E, 0x1B
 
 
 def _send(inputs):
@@ -97,6 +97,14 @@ def press_ctrl_a(bot):
 
 def press_delete(bot):
     _send([_key(VK_DELETE), _key(VK_DELETE, True)])
+    
+
+def press_escape(bot):
+    """Taps the Escape key, with a short random hold like a real key press."""
+    bot.checkpoint()
+    _send([_key(VK_ESCAPE)])
+    time.sleep(random.uniform(45, 110) / 1000)
+    _send([_key(VK_ESCAPE, True)])
 
 
 def type_text(bot, text):

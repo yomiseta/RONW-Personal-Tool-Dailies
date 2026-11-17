@@ -1,4 +1,4 @@
-"""Texts shown in the ACTION status bar, one per daily activity."""
+"""Goal names shown in the ACTION bar. The bot keeps working on the current goal until it is verified done."""
 
 IDLE = "Idle"
 MAILS = "Check and read mails"
