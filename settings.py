@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
-DEFAULTS = {"skin": "skins/default.png", "launcher_path": ""}
+DEFAULTS = {"skin": "skins/default.png", "launcher_path": "", "disabled_accounts": []}
 
 
 def load():

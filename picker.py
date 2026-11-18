@@ -40,11 +40,22 @@ class Picker:
         self.root.after(POLL_MS, self._poll)
 
     # ----- hotkeys -----
+    def _typing(self):
+        """True while the user is typing in one of this app's own text boxes or a dialog is open."""
+        try:
+            focus = self.root.focus_get()
+            if isinstance(focus, (tk.Entry, tk.Text)):
+                return True
+            return self.root.grab_current() is not None
+        except (KeyError, tk.TclError):
+            return False
+
     def _poll(self):
         try:
+            typing = self._typing()
             for vk, mode in ((VK_M, "point"), (VK_R, "rect")):
                 pressed = _down(VK_SHIFT) and _down(vk)
-                if pressed and not self._was_down[vk] and self._overlay is None:
+                if pressed and not self._was_down[vk] and self._overlay is None and not typing:
                     if self.is_busy():
                         self.log("The picker is off while the automation runs. Press STOP first.", "WARN")
                     else:

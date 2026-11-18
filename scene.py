@@ -2,6 +2,15 @@
 import vision
 import winutil
 
+STRIP = (0.0, 0.72, 1.0, 1.0)   # the bottom of the window: HUD markers, Game Menu, "Tap blank area", Continue Adventure
+
+
+def read_strip(bot, hwnd):
+    """Reads only the bottom strip of the game window. This is much quicker than reading the whole
+    window, and everything needed to follow the loading and the pop-ups is inside it."""
+    rect = winutil.get_rect(hwnd)
+    return rect, vision.ocr_words(bot, vision.region(rect, *STRIP), "both")
+
 
 def read(bot, hwnd):
     """Reads all text in the game window. Returns (window rectangle, words).

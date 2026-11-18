@@ -4,6 +4,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog
 
+import accounts_window
 import actions
 import picker
 import screen
@@ -11,33 +12,9 @@ import settings
 import skin
 import theme
 from automation import Automation
+from widgets import GameButton
 
 IDLE, RUNNING, PAUSED = "IDLE", "RUNNING", "PAUSED"
-
-
-class GameButton(tk.Label):
-    """A flat neon button. tk.Button ignores custom colours on Windows, so a Label is used instead."""
-
-    def __init__(self, parent, text, command, color):
-        super().__init__(parent, text=text, font=theme.FONT_BTN, fg=color, bg=theme.BG,
-                         highlightthickness=2, highlightbackground=color, cursor="hand2")
-        self.command, self.color, self.enabled = command, color, True
-        self.bind("<Enter>", lambda e: self.enabled and self.config(bg=self.color, fg=theme.BG))
-        self.bind("<Leave>", lambda e: self._paint())
-        self.bind("<Button-1>", lambda e: self.enabled and self.command())
-
-    def _paint(self):
-        if self.enabled:
-            self.config(bg=theme.BG, fg=self.color, highlightbackground=self.color, cursor="hand2")
-        else:
-            self.config(bg=theme.BG, fg=theme.MUTED, highlightbackground=theme.MUTED, cursor="arrow")
-
-    def set_enabled(self, value):
-        self.enabled = value
-        self._paint()
-
-    def set_text(self, text):
-        self.config(text=text)
 
 
 class Console:
@@ -73,6 +50,8 @@ class Console:
         self.log("Console ready. Press START.", "OK")
         self.picker = picker.Picker(self.root, self.log, lambda: self.state != IDLE)
         self.picker.start()
+        self.accounts_window = accounts_window.AccountsWindow(
+            self.root, self.settings, self.log, (self.game_area[0] + 40, self.game_area[1] + 40))
 
     # ---------- layout ----------
     def _build_top(self):
@@ -88,9 +67,11 @@ class Console:
         self.btn_start = GameButton(self.canvas, "START", self.on_start_stop, theme.GREEN)
         self.btn_pause = GameButton(self.canvas, "PAUSE", self.on_pause, theme.YELLOW)
         self.btn_quit = GameButton(self.canvas, "QUIT", self.on_quit, theme.RED)
+        self.btn_accounts = GameButton(self.canvas, "ACCOUNTS", self.on_accounts, theme.CYAN)
         self.btn_skin = GameButton(self.canvas, "CHANGE SKIN", self.on_change_skin, theme.MAGENTA)
         for i, btn in enumerate((self.btn_start, self.btn_pause, self.btn_quit)):
             self.canvas.create_window(x, 100 + i * 56, window=btn, anchor="nw", width=bw, height=bh)
+        self.canvas.create_window(x, 100 + 3 * 56, window=self.btn_accounts, anchor="nw", width=bw, height=bh)
         self.canvas.create_window(x, self.top_h - 56, window=self.btn_skin, anchor="nw", width=bw, height=36)
 
     def _build_log(self):
@@ -204,6 +185,7 @@ class Console:
             path = self._ensure_launcher_path()
             if not path:
                 return
+            self.accounts_window.close()
             self.automation = Automation(
                 log=self.log, set_action=self.set_action,
                 on_done=lambda: self.ui_queue.put(("done",)),
@@ -216,6 +198,14 @@ class Console:
             self.log("Stopping...", "WARN")
             self.automation.stop()
         self._refresh_buttons()
+
+
+    def on_accounts(self):
+        if self.state != IDLE:
+            self.log("The account list can only be changed while the automation is stopped.", "WARN")
+            return
+        self.accounts_window.open()
+
 
     def on_pause(self):
         if self.stopping or self.automation is None:

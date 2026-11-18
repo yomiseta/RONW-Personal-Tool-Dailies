@@ -9,7 +9,7 @@ Flow:
      window to close and click Launch Game.
   4. Wait for the game window and fit it next to the console.
 """
-import configparser
+
 import os
 import random
 from pathlib import Path
@@ -23,7 +23,6 @@ import winutil
 from errors import StepFailed
 
 BASE = Path(__file__).parent
-ACCOUNTS_FILE = BASE / "Accounts.ini"
 ACCOUNT_ICON = BASE / "assets" / "account_icon.png"
 ICON_REF_WIDTH = 1440      # launcher width at the time the icon picture was captured
 ICON_THRESHOLD = 0.8       # the real icon scores about 1.0, look-alike icons only about 0.5
@@ -31,25 +30,6 @@ ICON_AREA = (0.45, 0.04, 0.95, 0.17)     # top-right of the launcher, as fractio
 LAUNCH_AREA = (0.68, 0.82, 0.99, 0.96)   # where the Launch Game button sits
 STEP_TIMEOUT = 20          # seconds to wait for each login-window change
 POLL = 0.7                 # seconds between checks
-
-
-def load_account():
-    """Reads the first account (section [1]) from Accounts.ini."""
-    cfg = configparser.ConfigParser(interpolation=None)  # no interpolation, passwords may contain '%'
-    if not ACCOUNTS_FILE.exists():
-        raise StepFailed(f"Accounts.ini not found: {ACCOUNTS_FILE}")
-    raw = ACCOUNTS_FILE.read_bytes()
-    try:
-        # Ini files may be saved as UTF-16 (BOM at the start) or as UTF-8.
-        text = raw.decode("utf-16") if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raise StepFailed("Accounts.ini could not be read. Save it as UTF-8 or UTF-16.")
-    cfg.read_string(text)
-    account = cfg.get("1", "Account", fallback="").strip()
-    password = cfg.get("1", "Password", fallback="")
-    if not account or not password:
-        raise StepFailed("Accounts.ini needs an Account and Password in section [1].")
-    return account, password
 
 
 def _check_files():
@@ -266,9 +246,9 @@ def _wait_login_closed(bot):
         raise StepFailed("The login window did not close. The login may have failed.")
 
 
-def run(bot):
-    """Runs the complete login flow for the first account in Accounts.ini."""
-    account, password = load_account()
+def run(bot, account, password):
+    """Runs the launcher part of the login for the given account,
+    up to the point where the game window is open and placed."""
     _check_files()
     bot.log(f"Account to use: {account}")
 

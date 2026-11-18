@@ -27,6 +27,7 @@ user32.WindowFromPoint.argtypes = [wintypes.POINT]
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 user32.GetAncestor.restype = wintypes.HWND
+user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
@@ -255,6 +256,11 @@ def has_caption(hwnd):
 
 def restore(hwnd):
     user32.ShowWindow(hwnd, SW_RESTORE)
+
+
+def close_window(hwnd):
+    """Asks a window to close, the same as its close button."""
+    user32.PostMessageW(hwnd, 0x0010, 0, 0)   # WM_CLOSE
 
 
 def activate(hwnd):

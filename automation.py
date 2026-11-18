@@ -8,9 +8,10 @@ import threading
 import time
 import traceback
 
+import accounts
+import settings
 import actions
 import launcher
-import login
 import winutil
 import goals
 from errors import Stopped, StepFailed
@@ -135,10 +136,29 @@ class Automation:
             self.on_done()
 
     def _workflow(self):
+        queue = accounts.enabled(settings.load())   # the checked accounts, in the order of the list
+        if not queue:
+            raise StepFailed("No account is checked. Open ACCOUNTS and tick at least one.")
+        self.log(f"Accounts to automate: {len(queue)}.")
         count = winutil.minimize_all(skip_pid=os.getpid())
         self.log(f"Minimized {count} window(s).")
         launcher.open_and_arrange(self, self.launcher_path)
-        account, _ = login.load_account()
-        self.pursue(goals.LoginGoal(account))
+        for number, acc in enumerate(queue, 1):
+            self.log(f"Account {number} of {len(queue)}: {acc.name}")
+            self.pursue(goals.LoginGoal(acc.name, acc.password))
+            # The next goals (mails, events, Peer Arena, Quest Board, Guild Dailies) go here.
+            if number < len(queue):
+                self._close_game()
         self.log("Next goals (mails, events, Peer Arena, Quest Board, Guild Dailies) are not built yet. "
                  "Stopping here so you can test.", "OK")
+
+    def _close_game(self):
+        """Closes the game so the launcher can sign in the next account."""
+        hwnd = goals.game_window()
+        if hwnd is None:
+            return
+        self.log("Closing the game for the next account...")
+        winutil.close_window(hwnd)
+        if not self.wait_until(lambda: goals.game_window() is None, 45, 1.0):
+            raise StepFailed("The game did not close. Close it manually, then press START again.")
+        self.sleep(2.0)

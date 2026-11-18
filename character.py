@@ -15,6 +15,7 @@ import random
 import time
 from pathlib import Path
 
+import re
 import game
 import inputs
 import scene
@@ -24,19 +25,20 @@ from errors import StepFailed
 
 BASE = Path(__file__).parent
 CLOSE_X_ICON = BASE / "assets" / "close_x.png"
-CLOSE_X_REF_WIDTH = 1225        # game window width when the X picture was captured
+CLOSE_X_REF_WIDTH = 1225                 # game window width when the X picture was captured
 CLOSE_X_THRESHOLD = 0.5
 CLOSE_X_AREA = (0.0, 0.04, 1.0, 1.0)
+CONGRATS_AREA = (0.2, 0.15, 0.8, 0.65)   # middle of the window, as fractions of its size
 
-LEVEL_COLUMN = 0.45             # the character list sits in the left part of the window
-CONTINUE_RETRY_AFTER = 6        # seconds before Continue Adventure is clicked again
-LOAD_TIMEOUT = 150              # seconds the world may take to load after Continue Adventure
+LEVEL_COLUMN = 0.45                      # the character list sits in the left part of the window
+CONTINUE_RETRY_AFTER = 6                 # seconds before Continue Adventure is clicked again
+LOAD_TIMEOUT = 150                       # seconds the world may take to load after Continue Adventure
 MAX_RESIZES = 4
 MAX_ESC_UNKNOWN = 30
 MAX_POPUPS = 12
 MAX_MENU_ESC = 20
 MAX_MENU_CLOSE = 3
-
+FAST_MISS_LIMIT = 4                      # quick checks in a row that may find nothing before a full read is done
 
 class CharacterState:
     """What the stages have already done. The screen itself stays the source of truth."""
@@ -51,6 +53,7 @@ class CharacterState:
         self.menu_seen = False      # the Game Menu was opened by us and still has to be closed
         self.menu_close_tries = 0
         self.ready = False
+        self.fast_misses = 0        
 
 
 def _rect_of(word):
@@ -70,10 +73,14 @@ def _continue_button(words):
 
 
 def _first_level_text(words, rect):
-    """The "Lv." text of the first character: the topmost one in the left part of the window."""
-    limit = rect[0] + rect[2] * LEVEL_COLUMN
-    found = [w for w in words if vision.norm(w.text).startswith("lv") and w.x < limit]
-    return min(found, key=lambda w: w.y) if found else None
+    """The "Lv." text of the first character: the topmost one in the left part of the window.
+    Only words shaped like "Lv." or "Lv.94" count, and the top bar of the window is ignored,
+    so a character name or a stray label can never be picked by mistake."""
+    x, y, w, h = rect
+    limit, floor = x + w * LEVEL_COLUMN, y + h * 0.12
+    found = [wd for wd in words
+             if re.fullmatch(r"lv\w{0,3}", vision.norm(wd.text)) and wd.x < limit and wd.y > floor]
+    return min(found, key=lambda wd: wd.y) if found else None
 
 
 def _level_click_rect(word):
@@ -88,9 +95,9 @@ def _level_click_rect(word):
 
 def _press_escape(bot, hwnd):
     winutil.activate(hwnd)
-    bot.sleep(random.uniform(0.15, 0.3))
+    bot.sleep(random.uniform(0.1, 0.2))
     inputs.press_escape(bot)
-    bot.sleep(random.uniform(0.7, 1.1))
+    bot.sleep(random.uniform(0.4, 0.6))
 
 
 def _click_phrase(bot, hwnd, words, phrase):
@@ -226,7 +233,23 @@ def _game_world(bot, hwnd, rect, words, st):
     if st.menu_esc > MAX_MENU_ESC:
         raise StepFailed("The Game Menu never opened. Something is blocking the game world.")
     _press_escape(bot, hwnd)
-    bot.sleep(0.8)  # the menu slides in, read it only once it has settled
+    bot.sleep(0.4)  # the menu slides in, read it only once it has settled
+
+
+def _reward_popup(words, rect):
+    """The full-width "Congrats" reward window (shown after being offline, for example).
+    Escape cannot close it, only a click can. Returns where to click, or None when it is not showing.
+    The "Tap blank area to close" text is the backup marker when OCR misses the title."""
+    x, y, w, h = rect
+    left, top = x + w * CONGRATS_AREA[0], y + h * CONGRATS_AREA[1]
+    right, bottom = x + w * CONGRATS_AREA[2], y + h * CONGRATS_AREA[3]
+    for hit in vision.find_phrases(words, "congrats"):
+        if left <= (hit[0] + hit[2]) / 2 <= right and top <= (hit[1] + hit[3]) / 2 <= bottom:
+            return hit
+    if scene.has(words, "tap blank area"):
+        cx, cy = int(x + w * 0.5), int(y + h * 0.36)
+        return cx - 40, cy - 15, cx + 40, cy + 15
+    return None
 
 
 def advance(bot, hwnd, st):
@@ -234,7 +257,42 @@ def advance(bot, hwnd, st):
     if winutil.is_minimized(hwnd):
         winutil.restore(hwnd)
         bot.sleep(0.5)
+    # After Continue Adventure the screen is followed with a quick read of the bottom strip only.
+    # The full-window read is used again when the strip shows nothing familiar several times in a row.
+    fast = st.continue_clicked_at is not None and st.fast_misses < FAST_MISS_LIMIT
+    if fast:
+        rect, words = scene.read_strip(bot, hwnd)
+        popup = _reward_popup(words, rect)
+        if popup:
+            st.fast_misses = 0
+            winutil.activate(hwnd)
+            bot.sleep(random.uniform(0.1, 0.2))
+            inputs.click_rect(bot, hwnd, popup, jitter=0.15)
+            bot.log("Reward window (Congrats) closed with a click.")
+            bot.sleep(random.uniform(0.6, 0.9))
+            return
+        if _continue_button(words) is None:
+            if scene.menu_open(words) or scene.in_game(words):
+                st.unknown_count = 0
+                st.fast_misses = 0
+                return _game_world(bot, hwnd, rect, words, st)
+            st.fast_misses += 1
+            bot.sleep(1.0)   # nothing new yet: look again in one second
+            return
+        # Continue Adventure is on screen again: the full read below handles the retry.
+    else:
+        st.fast_misses = 0
     rect, words = scene.read(bot, hwnd)
+
+    popup = _reward_popup(words, rect)
+    if popup:
+        st.unknown_count = 0
+        winutil.activate(hwnd)
+        bot.sleep(random.uniform(0.15, 0.3))
+        inputs.click_rect(bot, hwnd, popup, jitter=0.15)
+        bot.log("Reward window (Congrats) closed with a click.")
+        bot.sleep(random.uniform(1.0, 1.4))
+        return
 
     button = _continue_button(words)
     if button:
@@ -270,7 +328,7 @@ def advance(bot, hwnd, st):
     loading = (st.continue_clicked_at is not None and
                time.monotonic() - st.continue_clicked_at < LOAD_TIMEOUT)
     if loading:
-        bot.sleep(2.0)
+        bot.sleep(1.0)
         return
     st.unknown_count += 1
     if st.unknown_count > MAX_ESC_UNKNOWN:
