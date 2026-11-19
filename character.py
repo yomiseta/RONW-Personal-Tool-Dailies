@@ -5,17 +5,21 @@ the single action that moves it forward. Nothing relies on the previous call hav
 so the goal loop can simply call it again until the game world is ready.
 
 Screens, in the order they are recognised:
-  character select  "Continue Adventure" is visible -> pick the first character, continue
-  exit dialog       "quit the game"                  -> Cancel
-  title screen      "tap the screen"                 -> tap it
-  game world        HUD markers (Base / Job / Auto)  -> close pop-ups, clear the Game Menu
-  anything else     loading or unknown               -> wait, or press Esc to reach the title screen
+  reward window     "Congrats" / "Tap blank area to close"   -> click it
+  character select  "Continue Adventure" is visible          -> pick the first character, continue
+  exit dialog       "quit the game"                          -> Cancel
+  title screen      "tap the screen"                         -> tap it
+  game world        HUD markers (Base / Job / Auto) or the Game Menu -> close pop-ups, clear the menu
+  anything else     loading or unknown                       -> wait, or press Esc to reach the title screen
+
+Once the character screen or the game world has been seen, the screen is followed with a quick
+read of its bottom strip only. The full window is read again when that shows nothing familiar.
 """
 import random
+import re
 import time
 from pathlib import Path
 
-import re
 import game
 import inputs
 import scene
@@ -25,43 +29,62 @@ from errors import StepFailed
 
 BASE = Path(__file__).parent
 CLOSE_X_ICON = BASE / "assets" / "close_x.png"
-CLOSE_X_REF_WIDTH = 1225                 # game window width when the X picture was captured
+CLOSE_X_REF_WIDTH = 1225        # game window width when the X picture was captured
 CLOSE_X_THRESHOLD = 0.5
 CLOSE_X_AREA = (0.0, 0.04, 1.0, 1.0)
-CONGRATS_AREA = (0.2, 0.15, 0.8, 0.65)   # middle of the window, as fractions of its size
 
-LEVEL_COLUMN = 0.45                      # the character list sits in the left part of the window
-CONTINUE_RETRY_AFTER = 6                 # seconds before Continue Adventure is clicked again
-LOAD_TIMEOUT = 150                       # seconds the world may take to load after Continue Adventure
+CONGRATS_AREA = (0.2, 0.15, 0.8, 0.65)   # middle of the window, as fractions of its size
+LEVEL_AREA = (0.04, 0.24, 0.30, 0.40)    # where the first character's "Lv." sits, as fractions of the window
+CONTINUE_POINT = (0.883, 0.828)          # Continue Adventure never moves, so it is clicked by position
+
+LEVEL_POLL = 0.5                # seconds between looks for the "Lv." text
+LEVEL_POLLS = 12                # looks per attempt
+SAME_SPOT = 3                   # pixels the "Lv." may differ between two looks and still count as still
+CONTINUE_DELAY = 0.7            # seconds between selecting the character and pressing Continue
+CONTINUE_RETRY_AFTER = 6        # seconds before Continue Adventure is pressed again
+LOAD_TIMEOUT = 150              # seconds the world may take to load after Continue Adventure
+WORLD_RECHECK = 0.5             # seconds to look again before acting in the game world
+FAST_MISS_LIMIT = 4             # quick reads in a row that may find nothing before a full read is done
 MAX_RESIZES = 4
+ESC_AFTER_UNKNOWN = 6           # unrecognised looks (about a second apart) before Esc is ever pressed
+MAX_MISFITS = 6                 # times in a row the window may need re-fitting before giving up
 MAX_ESC_UNKNOWN = 30
 MAX_POPUPS = 12
 MAX_MENU_ESC = 20
 MAX_MENU_CLOSE = 3
-FAST_MISS_LIMIT = 4                      # quick checks in a row that may find nothing before a full read is done
+
 
 class CharacterState:
     """What the stages have already done. The screen itself stays the source of truth."""
 
     def __init__(self):
+        self.use_strip = False        # the quick bottom-strip read is used once the game has got past the title
+        self.fast_misses = 0
         self.resizes = 0
+        self.misfits = 0
         self.character_selected = False   # the first character was clicked; retries only press Continue
         self.continue_clicked_at = None
         self.unknown_count = 0
         self.popups_closed = 0
+        self.world_stable = False     # the world markers were seen once and are being checked a second time
         self.menu_esc = 0
-        self.menu_seen = False      # the Game Menu was opened by us and still has to be closed
+        self.menu_seen = False        # the Game Menu was opened by us and still has to be closed
         self.menu_close_tries = 0
         self.ready = False
-        self.fast_misses = 0        
 
 
 def _rect_of(word):
     return word.x, word.y, word.x + word.w, word.y + word.h
 
 
+def _same_spot(a, b, tolerance=SAME_SPOT):
+    """True when two rectangles (left, top, right, bottom) sit at the same place, give or take a few pixels."""
+    return all(abs(p - q) <= tolerance for p, q in zip(a, b))
+
+
 def _continue_button(words):
-    """Rectangle of the "Continue Adventure" button, which OCR reads as two lines of text."""
+    """Rectangle of the "Continue Adventure" text, which OCR reads as two lines. Only used to
+    recognise the character screen; the button itself is pressed by its fixed position."""
     hits = vision.find_phrases(words, "continue adventure")
     if hits:
         return hits[0]
@@ -72,25 +95,21 @@ def _continue_button(words):
     return None
 
 
-def _first_level_text(words, rect):
-    """The "Lv." text of the first character: the topmost one in the left part of the window.
-    Only words shaped like "Lv." or "Lv.94" count, and the top bar of the window is ignored,
-    so a character name or a stray label can never be picked by mistake."""
-    x, y, w, h = rect
-    limit, floor = x + w * LEVEL_COLUMN, y + h * 0.12
-    found = [wd for wd in words
-             if re.fullmatch(r"lv\w{0,3}", vision.norm(wd.text)) and wd.x < limit and wd.y > floor]
-    return min(found, key=lambda wd: wd.y) if found else None
+def _find_level(bot, hwnd):
+    """Looks for the "Lv." text of the first character, and only in the small area where it sits.
+    Reading just that area is quick, and nothing else on the screen can be mistaken for it."""
+    rect = winutil.get_rect(hwnd)
+    words = vision.ocr_words(bot, vision.region(rect, *LEVEL_AREA), "both")
+    found = [w for w in words if re.fullmatch(r"lv\w{0,3}", vision.norm(w.text))]
+    return min(found, key=lambda w: w.y) if found else None
 
 
-def _level_click_rect(word):
-    """Rectangle of just the "Lv." letters inside the word OCR read (for example "Lv.32").
-    Clicking the middle of the whole word would land on the number."""
+def _level_center(word):
+    """The middle of the "Lv." letters themselves. OCR may read "Lv.94" as one word, and the
+    middle of that whole word would land on the number."""
     text = word.text.strip()
-    letters = 3 if text[:3].lower().replace("l", "l") and len(text) >= 3 else len(text)
-    share = min(1.0, letters / max(len(text), 1))
-    right = word.x + max(int(word.w * share), 6)
-    return word.x, word.y, right, word.y + word.h
+    share = min(3, len(text)) / max(len(text), 1)
+    return int(word.x + word.w * share / 2), int(word.y + word.h / 2)
 
 
 def _press_escape(bot, hwnd):
@@ -105,7 +124,7 @@ def _click_phrase(bot, hwnd, words, phrase):
     if not hits:
         return False
     winutil.activate(hwnd)
-    bot.sleep(random.uniform(0.15, 0.3))
+    bot.sleep(random.uniform(0.1, 0.2))
     inputs.click_rect(bot, hwnd, hits[0])
     return True
 
@@ -114,126 +133,6 @@ def _find_popup_x(bot, rect):
     hits, _ = vision.find_image(bot, vision.region(rect, *CLOSE_X_AREA), CLOSE_X_ICON,
                                 CLOSE_X_THRESHOLD, rect[2] / CLOSE_X_REF_WIDTH)
     return hits[0] if hits else None
-
-
-def _same_spot(a, b, tolerance=6):
-    """True when two rectangles (left, top, right, bottom) sit at the same place, give or take a few pixels."""
-    return all(abs(p - q) <= tolerance for p, q in zip(a, b))
-
-
-def _settled_targets(bot, hwnd, rect, level, button):
-    """Reads the screen again until the window, the Lv. text and the Continue Adventure button
-    stop moving between two reads. The character screen animates while it appears, so clicking
-    a position read a moment earlier can land beside the target.
-    Returns (level rectangle, button rectangle), or None if they did not settle."""
-    for _ in range(5):
-        bot.sleep(0.6)
-        new_rect, words = scene.read(bot, hwnd)
-        new_level, new_button = _first_level_text(words, new_rect), _continue_button(words)
-        if new_level is None or new_button is None:
-            return None
-        settled = (_same_spot(new_rect, rect) and _same_spot(_level_click_rect(new_level), level)
-                   and _same_spot(new_button, button))
-        rect, level, button = new_rect, _level_click_rect(new_level), new_button
-        if settled:
-            return level, button
-    return None
-
-
-def _settled_button(bot, hwnd, button):
-    """Waits until the Continue Adventure button holds the same position on two reads in a row.
-    Selecting a character makes the button move, so a single read can catch it mid-motion."""
-    previous = None
-    for _ in range(6):
-        bot.sleep(0.5)
-        rect, words = scene.read(bot, hwnd)
-        current = _continue_button(words)
-        if current is None:
-            continue
-        if previous is not None and _same_spot(current, previous):
-            return current
-        previous = current
-    return previous or button
-
-
-def _character_select(bot, hwnd, rect, words, button, st):
-    """The Lv. text is only clickable when the window fits the screen. The game can switch itself
-    to full screen while it loads, which pushes the character list out of view. So: Continue
-    Adventure is there, but Lv. is not -> fit the window again and look once more."""
-    level = _first_level_text(words, rect)
-    if level is None and not st.character_selected:
-        st.resizes += 1
-        if st.resizes > MAX_RESIZES:
-            raise StepFailed("The character list is still not visible after resizing the window.")
-        bot.log(f"Continue Adventure is visible but Lv. is not. Fitting the game window again "
-                f"({st.resizes}/{MAX_RESIZES})...", "WARN")
-        game.arrange(bot)
-        bot.sleep(1.5)
-        return
-    st.resizes = 0
-
-    if st.continue_clicked_at is not None and time.monotonic() - st.continue_clicked_at < CONTINUE_RETRY_AFTER:
-        bot.sleep(1.0)  # the click was just made, give the game time to react
-        return
-
-    winutil.activate(hwnd)
-    bot.sleep(random.uniform(0.15, 0.3))
-
-    if not st.character_selected:
-        targets = _settled_targets(bot, hwnd, rect, _level_click_rect(level), button)
-        if targets is None:
-            return  # the screen was still changing, the next pass starts again from a fresh read
-        level_rect, button = targets
-        candidates = [f"'{w.text}'@{w.x},{w.y}" for w in words if vision.norm(w.text).startswith("lv")]
-        bot.log(f"Lv. read: {', '.join(candidates)}. Clicking the Lv. of the first character at "
-                f"x={level_rect[0]}-{level_rect[2]}, y={level_rect[1]}-{level_rect[3]}.")
-        inputs.click_rect(bot, hwnd, level_rect, jitter=0.1)
-        st.character_selected = True
-        bot.log("First character selected.")
-        bot.sleep(random.uniform(0.7, 1.0))
-
-    # Selecting a character moves the button, so it is clicked only once it holds still.
-    button = _settled_button(bot, hwnd, button)
-    inputs.click_rect(bot, hwnd, button, jitter=0.04, hover_ms=250)
-    st.continue_clicked_at = time.monotonic()
-    bot.log(f"Continue Adventure clicked at x={button[0]}-{button[2]}, y={button[1]}-{button[3]}. "
-            f"Waiting for the game world...")
-
-
-def _game_world(bot, hwnd, rect, words, st):
-    """Closes the welcome pop-ups, then makes sure the Game Menu is not left open."""
-    if scene.menu_open(words):
-        if st.menu_close_tries >= MAX_MENU_CLOSE:
-            raise StepFailed("The Game Menu would not close.")
-        st.menu_close_tries += 1
-        st.menu_seen = True
-        _press_escape(bot, hwnd)
-        return
-
-    popup = _find_popup_x(bot, rect) if st.popups_closed < MAX_POPUPS else None
-    if popup:
-        winutil.activate(hwnd)
-        bot.sleep(random.uniform(0.15, 0.3))
-        inputs.click_rect(bot, hwnd, popup)
-        st.popups_closed += 1
-        bot.log(f"Pop-up closed with its X button (#{st.popups_closed}).")
-        bot.sleep(random.uniform(0.8, 1.2))
-        st.menu_seen = False
-        return
-
-    if st.menu_seen:
-        # The menu was opened and closed again and nothing else is on screen: the world is clear.
-        st.ready = True
-        bot.log(f"The game world is ready ({scene.in_game_detail(words)}).", "OK")
-        return
-
-    # Escape closes whatever is on top. When nothing is left to close it opens the Game Menu,
-    # which is the sign that the world is clear.
-    st.menu_esc += 1
-    if st.menu_esc > MAX_MENU_ESC:
-        raise StepFailed("The Game Menu never opened. Something is blocking the game world.")
-    _press_escape(bot, hwnd)
-    bot.sleep(0.4)  # the menu slides in, read it only once it has settled
 
 
 def _reward_popup(words, rect):
@@ -252,77 +151,217 @@ def _reward_popup(words, rect):
     return None
 
 
+def _close_reward_popup(bot, hwnd, rect, words, st):
+    """Clicks the reward window away. Returns True when it was showing."""
+    popup = _reward_popup(words, rect)
+    if not popup:
+        return False
+    st.unknown_count = 0
+    st.fast_misses = 0
+    winutil.activate(hwnd)
+    bot.sleep(random.uniform(0.1, 0.2))
+    inputs.click_rect(bot, hwnd, popup, jitter=0.15)
+    bot.log("Reward window (Congrats) closed with a click.")
+    bot.sleep(random.uniform(0.6, 0.9))
+    return True
+
+
+# ----- character select -----
+def _select_first_character(bot, hwnd, st):
+    """Finds the first character's "Lv." and clicks its centre once it has held still.
+    It looks every half second. The text must be found at the same place twice in a row, so a
+    moving or animated screen never causes a click on the wrong spot. If it cannot be seen after
+    two looks, the game window is probably not fitted (the game can switch itself to full screen
+    while loading), so the window is fitted again and the search carries on."""
+    winutil.activate(hwnd)
+    previous, missing, refitted = None, 0, False
+    for _ in range(LEVEL_POLLS):
+        word = _find_level(bot, hwnd)
+        if word is None:
+            previous = None
+            missing += 1
+            if missing == 2 and not refitted:
+                refitted = True
+                st.resizes += 1
+                if st.resizes > MAX_RESIZES:
+                    raise StepFailed("The character list is still not visible after fitting the window.")
+                bot.log(f"Continue Adventure is visible but Lv. is not. Fitting the game window again "
+                        f"({st.resizes}/{MAX_RESIZES})...", "WARN")
+                game.arrange(bot)
+        else:
+            if previous is not None and _same_spot(_rect_of(word), _rect_of(previous)):
+                x, y = _level_center(word)
+                inputs.click_point(bot, hwnd, x, y)
+                st.character_selected = True
+                st.resizes = 0
+                bot.log(f"First character selected: Lv. at x={x}, y={y}.")
+                return True
+            previous = word
+        bot.sleep(LEVEL_POLL)
+    return False
+
+
+def _character_select(bot, hwnd, st):
+    if st.continue_clicked_at is not None and time.monotonic() - st.continue_clicked_at < CONTINUE_RETRY_AFTER:
+        bot.sleep(1.0)  # the button was just pressed, give the game time to react
+        return
+
+    if not st.character_selected:
+        if not _select_first_character(bot, hwnd, st):
+            return  # not found this time, the next pass starts again
+        bot.sleep(CONTINUE_DELAY)
+
+    # Continue Adventure always sits at the same place, so it is clicked by position.
+    left, top, width, height = winutil.get_rect(hwnd)
+    x, y = left + round(width * CONTINUE_POINT[0]), top + round(height * CONTINUE_POINT[1])
+    winutil.activate(hwnd)
+    inputs.click_point(bot, hwnd, x, y, hover_ms=150)
+    st.continue_clicked_at = time.monotonic()
+    bot.log(f"Continue Adventure clicked at x={x}, y={y}. Waiting for the game world...")
+
+
+# ----- game world -----
+def _game_world(bot, hwnd, rect, words, st):
+    """Closes the welcome pop-ups, then makes sure the Game Menu is not left open."""
+    if scene.menu_open(words):
+        if st.menu_close_tries >= MAX_MENU_CLOSE:
+            raise StepFailed("The Game Menu would not close.")
+        st.menu_close_tries += 1
+        st.menu_seen = True
+        _press_escape(bot, hwnd)
+        return
+
+    popup = _find_popup_x(bot, rect) if st.popups_closed < MAX_POPUPS else None
+    if popup:
+        winutil.activate(hwnd)
+        bot.sleep(random.uniform(0.1, 0.2))
+        inputs.click_rect(bot, hwnd, popup)
+        st.popups_closed += 1
+        bot.log(f"Pop-up closed with its X button (#{st.popups_closed}).")
+        bot.sleep(random.uniform(0.5, 0.8))
+        st.menu_seen = False
+        st.world_stable = False
+        return
+
+    if not st.world_stable:
+        # The world markers are showing and no X button is in sight. Look once more half a second
+        # later before acting, in case a pop-up is still sliding in.
+        st.world_stable = True
+        bot.sleep(WORLD_RECHECK)
+        return
+
+    if st.menu_seen:
+        # The menu was opened and closed again and nothing else is on screen: the world is clear.
+        st.ready = True
+        bot.log(f"The game world is ready ({scene.in_game_detail(words)}).", "OK")
+        return
+
+    # Escape closes whatever is on top. When nothing is left to close it opens the Game Menu,
+    # which is the sign that the world is clear.
+    st.menu_esc += 1
+    if st.menu_esc > MAX_MENU_ESC:
+        raise StepFailed("The Game Menu never opened. Something is blocking the game world.")
+    _press_escape(bot, hwnd)
+    bot.sleep(0.2)  # the menu slides in, it is read on the next look
+
+
+def _misfitted(bot, hwnd):
+    """True when the game window is not inside the area reserved for it, for example after the
+    game switched itself to full screen and now covers the console."""
+    left, top, width, height = winutil.get_rect(hwnd)
+    ax, ay, aw, ah = bot.area
+    return (winutil.is_maximized(hwnd) or left < ax - 8 or top < ay - 8
+            or left + width > ax + aw + 8 or top + height > ay + ah + 8)
+
+
+def _refit_if_needed(bot, hwnd, st):
+    """Fits the window again before anything is read or clicked. Returns True when it did."""
+    if not _misfitted(bot, hwnd):
+        st.misfits = 0
+        return False
+    st.misfits += 1
+    if st.misfits > MAX_MISFITS:
+        raise StepFailed("The game window cannot be fitted next to the console.")
+    bot.log("The game window is out of place (full screen?). Fitting it again...", "WARN")
+    game.arrange(bot)
+    bot.sleep(0.5)
+    return True
+
+
+def _cancel_dialog(bot, hwnd, words):
+    """Esc on the character screen opens "Return to login screen?" (the title screen has a similar
+    exit dialog). Cancel keeps the game where it is. Returns True when a dialog was cancelled."""
+    asking = scene.has(words, "return to login") or (scene.has(words, "cancel") and scene.has(words, "confirm"))
+    if asking and _click_phrase(bot, hwnd, words, "cancel"):
+        bot.log("A confirmation dialog was open. Cancel clicked.", "WARN")
+        bot.sleep(random.uniform(0.5, 0.8))
+        return True
+    return False
+
+
 def advance(bot, hwnd, st):
     """Looks at the screen once and performs the next step towards the game world."""
     if winutil.is_minimized(hwnd):
         winutil.restore(hwnd)
         bot.sleep(0.5)
-    # After Continue Adventure the screen is followed with a quick read of the bottom strip only.
-    # The full-window read is used again when the strip shows nothing familiar several times in a row.
-    fast = st.continue_clicked_at is not None and st.fast_misses < FAST_MISS_LIMIT
-    if fast:
+
+    # The game can switch itself to full screen while loading. Fit it again before reading anything.
+    if _refit_if_needed(bot, hwnd, st):
+        return
+
+    # Quick read of the bottom strip, used once the game has got past the title screen.
+    if st.use_strip:
         rect, words = scene.read_strip(bot, hwnd)
-        popup = _reward_popup(words, rect)
-        if popup:
-            st.fast_misses = 0
-            winutil.activate(hwnd)
-            bot.sleep(random.uniform(0.1, 0.2))
-            inputs.click_rect(bot, hwnd, popup, jitter=0.15)
-            bot.log("Reward window (Congrats) closed with a click.")
-            bot.sleep(random.uniform(0.6, 0.9))
+        if _close_reward_popup(bot, hwnd, rect, words, st):
             return
-        if _continue_button(words) is None:
-            if scene.menu_open(words) or scene.in_game(words):
-                st.unknown_count = 0
-                st.fast_misses = 0
-                return _game_world(bot, hwnd, rect, words, st)
+        if _cancel_dialog(bot, hwnd, words):
+            return
+        if _continue_button(words):
+            st.fast_misses = st.unknown_count = 0
+            return _character_select(bot, hwnd, st)
+        if scene.menu_open(words) or scene.in_game(words):
+            st.fast_misses = st.unknown_count = 0
+            return _game_world(bot, hwnd, rect, words, st)
+        loading = (st.continue_clicked_at is not None and
+                   time.monotonic() - st.continue_clicked_at < LOAD_TIMEOUT)
+        if loading and st.fast_misses < FAST_MISS_LIMIT:
             st.fast_misses += 1
             bot.sleep(1.0)   # nothing new yet: look again in one second
             return
-        # Continue Adventure is on screen again: the full read below handles the retry.
-    else:
-        st.fast_misses = 0
+        st.fast_misses = 0   # nothing familiar for a while: do one full read below
+
+    # Full read of the whole window.
     rect, words = scene.read(bot, hwnd)
 
-    popup = _reward_popup(words, rect)
-    if popup:
-        st.unknown_count = 0
-        winutil.activate(hwnd)
-        bot.sleep(random.uniform(0.15, 0.3))
-        inputs.click_rect(bot, hwnd, popup, jitter=0.15)
-        bot.log("Reward window (Congrats) closed with a click.")
-        bot.sleep(random.uniform(1.0, 1.4))
+    if _close_reward_popup(bot, hwnd, rect, words, st):
         return
 
-    button = _continue_button(words)
-    if button:
+    if _cancel_dialog(bot, hwnd, words):
+        return
+
+    if _continue_button(words):
+        st.use_strip = True
         st.unknown_count = 0
-        return _character_select(bot, hwnd, rect, words, button, st)
+        return _character_select(bot, hwnd, st)
 
     if scene.has(words, "quit the game"):
         st.unknown_count = 0
         _click_phrase(bot, hwnd, words, "cancel")
-        bot.sleep(random.uniform(0.6, 1.0))
+        bot.sleep(random.uniform(0.4, 0.7))
         return
 
     if scene.has(words, "tap the screen"):
         st.unknown_count = 0
         _click_phrase(bot, hwnd, words, "tap the screen")
         bot.log("Title screen: tapped the screen.")
-        bot.sleep(random.uniform(1.2, 1.8))
+        bot.sleep(random.uniform(0.8, 1.2))
         return
 
-     # The Game Menu covers the HUD markers, so it has to be checked before the HUD itself.
+    # The Game Menu covers the HUD markers, so it has to be checked before the HUD itself.
     if scene.menu_open(words) or scene.in_game(words):
+        st.use_strip = True
         st.unknown_count = 0
         return _game_world(bot, hwnd, rect, words, st)
-
-    # Right after the Game Menu was used, an unreadable screen is the menu sliding away.
-    # Pressing Esc now would open it again, so just wait and read again.
-    if st.menu_seen and not st.ready and st.unknown_count < 10:
-        st.unknown_count += 1
-        bot.sleep(1.0)
-        return
 
     # Loading or unknown screen.
     loading = (st.continue_clicked_at is not None and
@@ -334,5 +373,10 @@ def advance(bot, hwnd, st):
     if st.unknown_count > MAX_ESC_UNKNOWN:
         raise StepFailed("The game screen could not be recognised.")
     seen = " ".join(w.text for w in words)[:90]
-    bot.log(f"Screen not recognised yet ({st.unknown_count}/{MAX_ESC_UNKNOWN}). Pressing Esc. Text read: {seen}", "WARN")
-    _press_escape(bot, hwnd)  # from most screens, Esc leads to the exit dialog and back to the title screen
+    if st.unknown_count < ESC_AFTER_UNKNOWN:
+        # Screens change and animate. Give this one time to become recognisable before touching any key.
+        bot.log(f"Screen not recognised yet ({st.unknown_count}). Waiting. Text read: {seen}", "WARN")
+        bot.sleep(1.0)
+        return
+    bot.log(f"Screen not recognised ({st.unknown_count}/{MAX_ESC_UNKNOWN}). Pressing Esc. Text read: {seen}", "WARN")
+    _press_escape(bot, hwnd)
