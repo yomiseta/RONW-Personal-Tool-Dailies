@@ -9,12 +9,13 @@ import time
 import traceback
 
 import accounts
-import settings
 import actions
-import launcher
-import winutil
+import daily_goals
 import goals
-from errors import Stopped, StepFailed
+import launcher
+import settings
+import winutil
+from errors import Halt, Stopped, StepFailed
 
 
 GOAL_TIMEOUT = 900     # seconds one goal may take before the bot gives up
@@ -89,7 +90,6 @@ class Automation:
             if time.monotonic() >= end:
                 return None
             end += self.sleep(interval)
-    
 
     # ----- goals -----
     def _set_goal(self, title):
@@ -107,18 +107,19 @@ class Automation:
             if goal.is_done(self):
                 self.log(f"Goal done: {goal.title}", "OK")
                 return
-            if time.monotonic() - started > GOAL_TIMEOUT:
+            if time.monotonic() - started > getattr(goal, "timeout", GOAL_TIMEOUT):
                 raise StepFailed(f"Goal not reached in time: {goal.title}")
             try:
                 goal.step(self)
                 failures = 0
+            except Halt:
+                raise   # a problem that repeating cannot fix: stop right away
             except StepFailed as err:
                 failures += 1
                 if failures >= MAX_FAILURES:
                     raise
                 self.log(f"{err} Trying again ({failures}/{MAX_FAILURES - 1})...", "WARN")
                 self.sleep(2.0)
-
 
     # ----- the job itself -----
     def _run(self):
@@ -146,11 +147,13 @@ class Automation:
         for number, acc in enumerate(queue, 1):
             self.log(f"Account {number} of {len(queue)}: {acc.name}")
             self.pursue(goals.LoginGoal(acc.name, acc.password))
-            # The next goals (mails, events, Peer Arena, Quest Board, Guild Dailies) go here.
+            daily = daily_goals.DailyState()
+            self.pursue(daily_goals.PeerArenaGoal(daily))
+            self.pursue(daily_goals.GuildGoal(daily))
+            # The next goals (mails, events, Quest Board) go here.
             if number < len(queue):
                 self._close_game()
-        self.log("Next goals (mails, events, Peer Arena, Quest Board, Guild Dailies) are not built yet. "
-                 "Stopping here so you can test.", "OK")
+        self.log("Next goals (mails, events, Quest Board) are not built yet. Stopping here so you can test.", "OK")
 
     def _close_game(self):
         """Closes the game so the launcher can sign in the next account."""
