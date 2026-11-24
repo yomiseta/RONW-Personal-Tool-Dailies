@@ -119,6 +119,25 @@ def press_esc(bot, hwnd):
 
 
 # ----- waiting for something on screen -----
+def press_key(bot, hwnd, vk):
+    """Taps a key once, like a quick key press."""
+    winutil.activate(hwnd)
+    bot.sleep(random.uniform(0.1, 0.2))
+    inputs.press_key(bot, vk)
+
+
+def move_forward(bot, hwnd):
+    """One tap of W: the character takes a step forward."""
+    press_key(bot, hwnd, inputs.VK_W)
+
+
+def look_image(bot, hwnd, area, icon, threshold=0.7, ref_width=LOOT_REF_WIDTH):
+    """One look for a picture in an area. Returns its rectangle, or None."""
+    rect = winutil.get_rect(hwnd)
+    hits, _ = vision.find_image(bot, vision.region(rect, *area), icon, threshold, rect[2] / ref_width)
+    return hits[0] if hits else None
+
+
 def wait_word(bot, hwnd, area, target, what, confirm=None):
     """Looks for a word every half second, up to 10 times, and returns its rectangle.
     With `confirm`, a found word is looked for once more after that many seconds, and the
@@ -170,11 +189,16 @@ def wait_ratio(bot, hwnd, area, what, accept=None):
 
 # ----- back to the game world -----
 def ensure_world(bot, hwnd):
-    """Presses Esc until the game world is on screen: HUD markers visible and no Game Menu.
-    The screen is read before each press, so Esc is never pressed once the world is showing."""
+    """Presses Esc until the game world is on screen. The screen is read before each press, so Esc is
+    never pressed once the world is showing.
+    The HUD markers (Base, Job, Auto, Target List) are not always visible, for example right after
+    some quests. In that case Esc is the test: it closes whatever is on top, and when nothing is left
+    it opens the Game Menu. A Game Menu that opened and closed again means the world is clear."""
+    menu_seen = False
     for _ in range(MAX_ESC):
         _, words = scene.read_strip(bot, hwnd)
         if scene.menu_open(words):
+            menu_seen = True
             press_esc(bot, hwnd)       # the Game Menu is open: close it
             bot.sleep(0.6)
             continue
@@ -184,6 +208,10 @@ def ensure_world(bot, hwnd):
             if scene.in_game(words) and not scene.menu_open(words):
                 return
             continue
+        if menu_seen:
+            # The menu has just closed and nothing else is on screen, so the world is clear.
+            bot.log("The game world is clear (the Game Menu opened and closed again).")
+            return
         press_esc(bot, hwnd)
         bot.sleep(0.6)
     raise Halt("Stopped: the game world could not be reached with Esc.")

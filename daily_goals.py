@@ -5,6 +5,7 @@ import actions
 import guild_dailies
 import peer_arena
 import progress
+import quest_board
 from errors import StepFailed
 from goals import Goal, game_window
 
@@ -15,6 +16,7 @@ class DailyState:
     account: str
     peer_arena: int = 0
     guild: int = 0
+    quest_board: int = 0
 
     @classmethod
     def load(cls, account):
@@ -63,4 +65,17 @@ class GuildGoal(_InGameGoal):
 
     def step(self, bot):
         guild_dailies.run(bot, self._window(), self.daily)
+        self._record()
+
+
+class QuestBoardGoal(_InGameGoal):
+    title = actions.QUEST_BOARD
+    key = "quest_board"
+    timeout = 3000   # the five commissions can take a long time to play
+
+    def is_done(self, bot):
+        return self.daily.quest_board == 1
+
+    def step(self, bot):
+        quest_board.run(bot, self._window(), self.daily)
         self._record()

@@ -42,7 +42,7 @@ def _finish(bot, hwnd, daily):
 
 def _wait_for_quests(bot, hwnd):
     """Waits while the character plays the quests by itself, closing item pop-ups on the way."""
-    total = config.GUILD_WAIT_SECONDS
+    total = config.guild_dailies_wait_seconds()
     bot.log(f"Guild Dailies: waiting {total} seconds for the quests to finish.")
     waited = last_report = 0
     while waited < total:
@@ -69,6 +69,11 @@ def run(bot, hwnd, daily):
     bot.sleep(TELEPORT_WAIT)
 
     ingame.begin(bot, hwnd, "Guild Dailies: looking for the Talk prompt.")
+    if not ingame.look_image(bot, hwnd, TALK_KEY_AREA, TALK_KEY_ICON):
+        # The character is not close enough to the NPC yet: one step forward, then look again.
+        bot.log("Guild Dailies: the Talk prompt is not showing. Moving forward with W.")
+        ingame.move_forward(bot, hwnd)
+        bot.sleep(0.5)
     ingame.wait_image(bot, hwnd, TALK_KEY_AREA, TALK_KEY_ICON, "Talk key hint")
     ingame.click_fraction(bot, hwnd, TALK, "Talk")
 
@@ -91,4 +96,4 @@ def run(bot, hwnd, daily):
         _finish(bot, hwnd, daily)
         return
     raise ingame.Halt("Stopped: the Guild Dailies still show "
-                      f"{done}/{total} after waiting. The quests may need more time (see GUILD_WAIT_SECONDS in main.py).")
+                      f"{done}/{total} after waiting. The quests may need more time (see GUILD_DAILIES_WAIT_SECONDS in config.ini).")

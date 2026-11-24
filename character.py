@@ -5,12 +5,15 @@ the single action that moves it forward. Nothing relies on the previous call hav
 so the goal loop can simply call it again until the game world is ready.
 
 Screens, in the order they are recognised:
+  Recent News       "Recent News" window                     -> close it with its X button
+  title screen      "Tap" below the logo                     -> tap the screen
   reward window     "Congrats" / "Tap blank area to close"   -> click it
   character select  "Continue Adventure" is visible          -> pick the first character, continue
-  exit dialog       "quit the game"                          -> Cancel
-  title screen      "tap the screen"                         -> tap it
   game world        HUD markers (Base / Job / Auto) or the Game Menu -> close pop-ups, clear the menu
-  anything else     loading or unknown                       -> wait, or press Esc to reach the title screen
+  anything else     loading or unknown                       -> wait (no key is pressed)
+
+The Recent News window and the title screen are found with two small, quick reads instead of a
+full read of the window, so they are handled as soon as they appear.
 
 Once the character screen or the game world has been seen, the screen is followed with a quick
 read of its bottom strip only. The full window is read again when that shows nothing familiar.
@@ -37,6 +40,13 @@ CONGRATS_AREA = (0.2, 0.15, 0.8, 0.65)   # middle of the window, as fractions of
 LEVEL_AREA = (0.04, 0.24, 0.30, 0.40)    # where the first character's "Lv." sits, as fractions of the window
 CONTINUE_POINT = (0.883, 0.828)          # Continue Adventure never moves, so it is clicked by position
 
+NEWS_AREA = (0.444, 0.184, 0.613, 0.235)   # title of the "Recent News" window
+NEWS_CLOSE = (0.890, 0.210)                # its close button
+TAP_AREA = (0.406, 0.677, 0.587, 0.727)    # the "Tap the screen" text of the title screen
+TAP_POINT = (0.501, 0.704)                 # where the screen is tapped
+TAP_POLL = 0.5                             # seconds between looks for "Tap" after the news is closed
+TAP_POLLS = 10                             # looks before the normal flow takes over
+
 LEVEL_POLL = 0.5                # seconds between looks for the "Lv." text
 LEVEL_POLLS = 12                # looks per attempt
 SAME_SPOT = 3                   # pixels the "Lv." may differ between two looks and still count as still
@@ -46,9 +56,8 @@ LOAD_TIMEOUT = 150              # seconds the world may take to load after Conti
 WORLD_RECHECK = 0.5             # seconds to look again before acting in the game world
 FAST_MISS_LIMIT = 4             # quick reads in a row that may find nothing before a full read is done
 MAX_RESIZES = 4
-ESC_AFTER_UNKNOWN = 6           # unrecognised looks (about a second apart) before Esc is ever pressed
 MAX_MISFITS = 6                 # times in a row the window may need re-fitting before giving up
-MAX_ESC_UNKNOWN = 30
+MAX_UNKNOWN = 60                # unrecognised looks (about a second apart) before the bot gives up
 MAX_POPUPS = 12
 MAX_MENU_ESC = 20
 MAX_MENU_CLOSE = 3
@@ -164,6 +173,55 @@ def _close_reward_popup(bot, hwnd, rect, words, st):
     bot.log("Reward window (Congrats) closed with a click.")
     bot.sleep(random.uniform(0.6, 0.9))
     return True
+
+
+# ----- Recent News and the title screen -----
+def _read_area(bot, hwnd, area):
+    """OCR of one small part of the game window. This is much quicker than reading the whole window."""
+    return vision.ocr_words(bot, vision.region(winutil.get_rect(hwnd), *area), "both")
+
+
+def _news_showing(words):
+    return scene.has(words, "recent news") or any(vision.norm(w.text) in ("news", "recentnews") for w in words)
+
+
+def _tap_showing(words):
+    return any(vision.norm(w.text).startswith("tap") for w in words)
+
+
+def _click_fraction(bot, hwnd, point):
+    """Clicks a fixed point of the game window, exactly. Returns the screen position."""
+    left, top, width, height = winutil.get_rect(hwnd)
+    x, y = left + round(width * point[0]), top + round(height * point[1])
+    winutil.activate(hwnd)
+    bot.sleep(random.uniform(0.1, 0.2))
+    inputs.click_point(bot, hwnd, x, y)
+    return x, y
+
+
+def _tap_screen(bot, hwnd):
+    x, y = _click_fraction(bot, hwnd, TAP_POINT)
+    bot.log(f"Title screen: tapped the screen at x={x}, y={y}.")
+    bot.sleep(random.uniform(0.8, 1.2))
+
+
+def _title_screens(bot, hwnd, st):
+    """Closes the Recent News window and taps the title screen. Returns True when it did something."""
+    if _news_showing(_read_area(bot, hwnd, NEWS_AREA)):
+        x, y = _click_fraction(bot, hwnd, NEWS_CLOSE)
+        bot.log(f"Recent News closed with its X button at x={x}, y={y}.")
+        st.unknown_count = 0
+        for _ in range(TAP_POLLS):
+            bot.sleep(TAP_POLL)
+            if _tap_showing(_read_area(bot, hwnd, TAP_AREA)):
+                _tap_screen(bot, hwnd)
+                break
+        return True
+    if _tap_showing(_read_area(bot, hwnd, TAP_AREA)):
+        st.unknown_count = 0
+        _tap_screen(bot, hwnd)
+        return True
+    return False
 
 
 # ----- character select -----
@@ -289,8 +347,8 @@ def _refit_if_needed(bot, hwnd, st):
 
 
 def _cancel_dialog(bot, hwnd, words):
-    """Esc on the character screen opens "Return to login screen?" (the title screen has a similar
-    exit dialog). Cancel keeps the game where it is. Returns True when a dialog was cancelled."""
+    """Cancels a "Return to login screen?" style confirmation if one is ever open.
+    Cancel keeps the game where it is. Returns True when a dialog was cancelled."""
     asking = scene.has(words, "return to login") or (scene.has(words, "cancel") and scene.has(words, "confirm"))
     if asking and _click_phrase(bot, hwnd, words, "cancel"):
         bot.log("A confirmation dialog was open. Cancel clicked.", "WARN")
@@ -307,6 +365,10 @@ def advance(bot, hwnd, st):
 
     # The game can switch itself to full screen while loading. Fit it again before reading anything.
     if _refit_if_needed(bot, hwnd, st):
+        return
+
+    # Recent News and the title screen come first, before the character screen has been reached.
+    if not st.use_strip and _title_screens(bot, hwnd, st):
         return
 
     # Quick read of the bottom strip, used once the game has got past the title screen.
@@ -344,12 +406,6 @@ def advance(bot, hwnd, st):
         st.unknown_count = 0
         return _character_select(bot, hwnd, st)
 
-    if scene.has(words, "quit the game"):
-        st.unknown_count = 0
-        _click_phrase(bot, hwnd, words, "cancel")
-        bot.sleep(random.uniform(0.4, 0.7))
-        return
-
     if scene.has(words, "tap the screen"):
         st.unknown_count = 0
         _click_phrase(bot, hwnd, words, "tap the screen")
@@ -370,13 +426,9 @@ def advance(bot, hwnd, st):
         bot.sleep(1.0)
         return
     st.unknown_count += 1
-    if st.unknown_count > MAX_ESC_UNKNOWN:
+    if st.unknown_count > MAX_UNKNOWN:
         raise StepFailed("The game screen could not be recognised.")
     seen = " ".join(w.text for w in words)[:90]
-    if st.unknown_count < ESC_AFTER_UNKNOWN:
-        # Screens change and animate. Give this one time to become recognisable before touching any key.
-        bot.log(f"Screen not recognised yet ({st.unknown_count}). Waiting. Text read: {seen}", "WARN")
-        bot.sleep(1.0)
-        return
-    bot.log(f"Screen not recognised ({st.unknown_count}/{MAX_ESC_UNKNOWN}). Pressing Esc. Text read: {seen}", "WARN")
-    _press_escape(bot, hwnd)
+    # Screens change and animate, so an unknown one is simply waited out. No key is pressed.
+    bot.log(f"Screen not recognised yet ({st.unknown_count}). Waiting. Text read: {seen}", "WARN")
+    bot.sleep(1.0)

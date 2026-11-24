@@ -1,6 +1,7 @@
 """Thin wrappers around the Win32 window API: finding, arranging and inspecting windows."""
 import ctypes
 import re
+import subprocess
 from ctypes import wintypes
 
 user32 = ctypes.windll.user32
@@ -35,8 +36,23 @@ kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD,
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
 
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+
+user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+user32.MonitorFromWindow.restype = ctypes.c_void_p
+user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+
+
 SW_MINIMIZE, SW_RESTORE = 6, 9
 SWP_SHOWWINDOW = 0x0040
+SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_FRAMECHANGED = 0x0001, 0x0002, 0x0004, 0x0020
+MONITOR_NEAREST = 2
+WS_POPUP, WS_OVERLAPPEDWINDOW = 0x80000000, 0x00CF0000
 GWL_STYLE, GWL_EXSTYLE = -16, -20
 WS_CAPTION, WS_EX_TOOLWINDOW = 0xC00000, 0x80
 DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_CLOAKED = 9, 14
@@ -254,6 +270,43 @@ def has_caption(hwnd):
     return bool(user32.GetWindowLongW(hwnd, GWL_STYLE) & WS_CAPTION)
 
 
+def is_fullscreen(hwnd):
+    """True when the window is full screen. A window with a title bar is a window, even when it is
+    big enough to cover the whole monitor: that only needs resizing, not a mode switch."""
+    if user32.IsIconic(hwnd):
+        return False
+    if not has_caption(hwnd):
+        return True
+    if user32.IsZoomed(hwnd):
+        return False   # maximised, which restore() undoes
+    # The caption flag is set, so it only counts as full screen when the title bar is not really
+    # showing: the drawing area then starts at the window's own corner and covers a whole monitor.
+    corner = wintypes.POINT(0, 0)
+    user32.ClientToScreen(hwnd, ctypes.byref(corner))
+    win = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(win))
+    if abs(corner.x - win.left) > 2 or abs(corner.y - win.top) > 2:
+        return False
+    monitor = user32.MonitorFromWindow(hwnd, MONITOR_NEAREST)
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(MONITORINFO)
+    if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        return False
+    m = info.rcMonitor
+    return win.left <= m.left and win.top <= m.top and win.right >= m.right and win.bottom >= m.bottom
+
+
+def force_windowed(hwnd):
+    """Gives a borderless window its title bar and borders back. Works for borderless full screen;
+    a real exclusive full screen has to be switched with Alt+Enter instead."""
+    style = user32.GetWindowLongW(hwnd, GWL_STYLE) & 0xFFFFFFFF
+    style = (style | WS_OVERLAPPEDWINDOW) & ~WS_POPUP
+    if style >= 0x80000000:
+        style -= 0x100000000
+    user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER)
+
+
 def restore(hwnd):
     user32.ShowWindow(hwnd, SW_RESTORE)
 
@@ -261,6 +314,14 @@ def restore(hwnd):
 def close_window(hwnd):
     """Asks a window to close, the same as its close button."""
     user32.PostMessageW(hwnd, 0x0010, 0, 0)   # WM_CLOSE
+
+
+def kill_process(hwnd):
+    """Ends the program that owns a window. Only used when it ignored a request to close."""
+    pid = _pid(hwnd)
+    if pid:
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
 
 
 def activate(hwnd):

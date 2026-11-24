@@ -1,20 +1,27 @@
-"""Coordinate picker: Shift+M reads one point, Shift+R reads a rectangle.
+"""Coordinate picker: Shift+M reads a point, Shift+R reads a rectangle, Shift+C reads a colour.
 
-Both open a see-through layer over the whole screen. The click or drag lands on that layer,
+Each key opens a see-through layer over the whole screen. The click or drag lands on that layer,
 so the game never receives it, and the result is written to the log in screen pixels and as
 fractions of the game window, which is the form the screen-reading code uses.
+
+For the colour, the screen is captured before the layer opens, so the value is the real colour
+of the game and not the colour darkened by the layer.
 """
 import ctypes
 import os
 import tkinter as tk
 
+from PIL import Image, ImageGrab
+
 import winutil
 
 user32 = ctypes.windll.user32
-VK_SHIFT, VK_M, VK_R = 0x10, 0x4D, 0x52
+VK_SHIFT, VK_M, VK_R, VK_C = 0x10, 0x4D, 0x52, 0x43
 POLL_MS = 40
 MIN_DRAG = 4                 # pixels; a smaller drag is treated as a stray click
+AVERAGE_RADIUS = 2           # the colour is also averaged over (2 * radius + 1) squared pixels
 OUTLINE = "#00ff99"
+TEXT_BOXES = ("Entry", "TEntry", "Text", "Spinbox", "TSpinbox")
 
 
 def _down(vk):
@@ -32,30 +39,36 @@ class Picker:
         self.root = root
         self.log = log              # callable: log(message, level)
         self.is_busy = is_busy      # callable: True while the automation is running
-        self._was_down = {VK_M: False, VK_R: False}
+        self._was_down = {VK_M: False, VK_R: False, VK_C: False}
         self._overlay = None
+        self._shot = None
 
     def start(self):
-        self.log("Picker ready: Shift+M reads a point, Shift+R reads a rectangle (Esc cancels).")
+        self.log("Picker ready: Shift+M reads a point, Shift+R a rectangle, Shift+C a colour (Esc cancels).")
         self.root.after(POLL_MS, self._poll)
 
     # ----- hotkeys -----
     def _typing(self):
-        """True while the user is typing in one of this app's own text boxes or a dialog is open."""
+        """True while a text box has the keyboard or a dialog is open, so typing a capital
+        letter there does not trigger the picker."""
         try:
-            focus = self.root.focus_get()
-            if isinstance(focus, (tk.Entry, tk.Text)):
+            if self.root.grab_current() is not None:
                 return True
-            return self.root.grab_current() is not None
+            widget = self.root.focus_get()
         except (KeyError, tk.TclError):
             return False
+        if widget is None or widget.winfo_class() not in TEXT_BOXES:
+            return False
+        try:
+            return str(widget.cget("state")) != "disabled"   # the read-only log does not count
+        except tk.TclError:
+            return True
 
     def _poll(self):
         try:
-            typing = self._typing()
-            for vk, mode in ((VK_M, "point"), (VK_R, "rect")):
+            for vk, mode in ((VK_M, "point"), (VK_R, "rect"), (VK_C, "color")):
                 pressed = _down(VK_SHIFT) and _down(vk)
-                if pressed and not self._was_down[vk] and self._overlay is None and not typing:
+                if pressed and not self._was_down[vk] and self._overlay is None and not self._typing():
                     if self.is_busy():
                         self.log("The picker is off while the automation runs. Press STOP first.", "WARN")
                     else:
@@ -67,6 +80,14 @@ class Picker:
     # ----- the see-through layer -----
     def _open(self, mode):
         left, top, width, height = _virtual_screen()
+        self._shot = None
+        if mode == "color":
+            # Captured now, before the layer appears, so the colours are not tinted by it.
+            try:
+                self._shot = ImageGrab.grab(all_screens=True).convert("RGB")
+            except Exception as err:
+                self.log(f"The screen could not be captured: {type(err).__name__}.", "ERROR")
+                return
         win = tk.Toplevel(self.root)
         win.overrideredirect(True)
         win.attributes("-topmost", True)
@@ -83,6 +104,9 @@ class Picker:
         if mode == "point":
             self.log("Click the point you want...")
             canvas.bind("<ButtonRelease-1>", self._finish_point)
+        elif mode == "color":
+            self.log("Click the point whose colour you want...")
+            canvas.bind("<ButtonRelease-1>", self._finish_color)
         else:
             self.log("Drag the rectangle you want...")
             canvas.bind("<ButtonPress-1>", self._begin_drag)
@@ -97,6 +121,7 @@ class Picker:
             self._overlay.destroy()
             self._overlay = None
         if message:
+            self._shot = None
             self.log(message)
 
     # ----- point -----
@@ -104,6 +129,27 @@ class Picker:
         x, y = event.x_root, event.y_root
         self._close()
         self.log(f"Point: x={x} y={y}", "OK")
+        self._describe_point(x, y)
+
+    # ----- colour -----
+    def _finish_color(self, event):
+        x, y = event.x_root, event.y_root
+        shot, self._shot = self._shot, None
+        ox, oy = self._origin
+        self._close()
+        px, py = x - ox, y - oy
+        if shot is None or not (0 <= px < shot.width and 0 <= py < shot.height):
+            self.log("That point is outside the captured screen. Press Shift+C and try again.", "WARN")
+            return
+        r, g, b = shot.getpixel((px, py))
+        self.log(f"Colour at x={x} y={y}: RGB ({r}, {g}, {b})  hex #{r:02X}{g:02X}{b:02X}", "OK")
+
+        # Average of the pixels around it, which is steadier on gradients and soft edges.
+        box = (max(px - AVERAGE_RADIUS, 0), max(py - AVERAGE_RADIUS, 0),
+               min(px + AVERAGE_RADIUS + 1, shot.width), min(py + AVERAGE_RADIUS + 1, shot.height))
+        ar, ag, ab = shot.crop(box).resize((1, 1), Image.BOX).getpixel((0, 0))
+        size = 2 * AVERAGE_RADIUS + 1
+        self.log(f"  Average of {size}x{size} around it: RGB ({ar}, {ag}, {ab})  hex #{ar:02X}{ag:02X}{ab:02X}")
         self._describe_point(x, y)
 
     # ----- rectangle -----

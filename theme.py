@@ -12,7 +12,7 @@ MUTED = "#6b7a99"
 
 # A negative font size is measured in pixels, which keeps the layout
 # independent of the Windows display scaling setting.
-FONT_TITLE = ("Consolas", -22, "bold")
+FONT_TITLE = ("Consolas", -30, "bold")
 FONT_STATUS = ("Consolas", -14)
 FONT_BTN = ("Consolas", -16, "bold")
 FONT_LOG = ("Consolas", -13)

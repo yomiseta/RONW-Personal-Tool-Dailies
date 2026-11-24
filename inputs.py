@@ -46,6 +46,7 @@ INPUT_MOUSE, INPUT_KEYBOARD = 0, 1
 MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
 KEYEVENTF_KEYUP, KEYEVENTF_UNICODE = 0x0002, 0x0004
 VK_CONTROL, VK_A, VK_DELETE, VK_ESCAPE = 0x11, 0x41, 0x2E, 0x1B
+VK_W, VK_MENU, VK_RETURN = 0x57, 0x12, 0x0D   # W, Alt, Enter
 
 
 def _send(inputs):
@@ -106,6 +107,26 @@ def press_escape(bot):
     time.sleep(random.uniform(45, 110) / 1000)
     _send([_key(VK_ESCAPE, True)])
 
+
+def press_key(bot, vk, hold_ms=(45, 110)):
+    """Taps a key once, with a short random hold like a real key press."""
+    bot.checkpoint()
+    _send([_key(vk)])
+    time.sleep(random.uniform(*hold_ms) / 1000)
+    _send([_key(vk, True)])
+
+
+def press_alt_enter(bot):
+    """Alt+Enter, which switches the game between full screen and windowed mode."""
+    bot.checkpoint()
+    _send([_key(VK_MENU)])
+    time.sleep(random.uniform(60, 120) / 1000)
+    _send([_key(VK_RETURN)])
+    time.sleep(random.uniform(60, 120) / 1000)
+    _send([_key(VK_RETURN, True)])
+    time.sleep(random.uniform(40, 90) / 1000)
+    _send([_key(VK_MENU, True)])
+    
 
 def type_text(bot, text):
     """Types the whole text into the focused field in a single SendInput call.

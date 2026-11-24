@@ -14,7 +14,7 @@ FILE = Path(__file__).parent / "daily_progress.json"
 
 # The in-game activities that count towards "finished for today".
 # When a new activity is added, add its name here and as a field of DailyState (daily_goals.py).
-GOALS = ("peer_arena", "guild")
+GOALS = ("peer_arena", "guild", "quest_board")
 
 
 def today():

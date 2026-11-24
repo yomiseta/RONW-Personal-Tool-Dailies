@@ -6,6 +6,7 @@ from tkinter import filedialog
 
 import accounts_window
 import actions
+import config_window
 import picker
 import screen
 import settings
@@ -52,6 +53,8 @@ class Console:
         self.picker.start()
         self.accounts_window = accounts_window.AccountsWindow(
             self.root, self.settings, self.log, (self.game_area[0] + 40, self.game_area[1] + 40))
+        self.config_window = config_window.ConfigWindow(
+            self.root, self.log, (self.game_area[0] + 40, self.game_area[1] + 40))
 
     # ---------- layout ----------
     def _build_top(self):
@@ -60,7 +63,11 @@ class Console:
         self.canvas.place(x=0, y=0)
         self._apply_skin()
 
-        self.canvas.create_text(self.w // 2, 32, text="RONW  AUTOBOSS", fill=theme.CYAN, font=theme.FONT_TITLE)
+        title = "RONW AUTOniBOSS"
+        cx, cy = self.w // 2, 32
+        for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2), (-2, -2), (2, 2), (-2, 2), (2, -2)):
+            self.canvas.create_text(cx + dx, cy + dy, text=title, fill="#e8f4ff", font=theme.FONT_TITLE)
+        self.canvas.create_text(cx, cy, text=title, fill="#0a1020", font=theme.FONT_TITLE)
         self.status_id = self.canvas.create_text(self.w // 2, 64, text="", fill=theme.TEXT, font=theme.FONT_STATUS)
 
         bw, bh, x = self.w - 60, 44, 30
@@ -68,10 +75,12 @@ class Console:
         self.btn_pause = GameButton(self.canvas, "PAUSE", self.on_pause, theme.YELLOW)
         self.btn_quit = GameButton(self.canvas, "QUIT", self.on_quit, theme.RED)
         self.btn_accounts = GameButton(self.canvas, "ACCOUNTS", self.on_accounts, theme.CYAN)
+        self.btn_config = GameButton(self.canvas, "CONFIG", self.on_config, theme.TEXT)
         self.btn_skin = GameButton(self.canvas, "CHANGE SKIN", self.on_change_skin, theme.MAGENTA)
         for i, btn in enumerate((self.btn_start, self.btn_pause, self.btn_quit)):
             self.canvas.create_window(x, 100 + i * 56, window=btn, anchor="nw", width=bw, height=bh)
         self.canvas.create_window(x, 100 + 3 * 56, window=self.btn_accounts, anchor="nw", width=bw, height=bh)
+        self.canvas.create_window(x, 100 + 4 * 56, window=self.btn_config, anchor="nw", width=bw, height=bh)
         self.canvas.create_window(x, self.top_h - 56, window=self.btn_skin, anchor="nw", width=bw, height=36)
 
     def _build_log(self):
@@ -186,6 +195,7 @@ class Console:
             if not path:
                 return
             self.accounts_window.close()
+            self.config_window.close(force=True)
             self.automation = Automation(
                 log=self.log, set_action=self.set_action,
                 on_done=lambda: self.ui_queue.put(("done",)),
@@ -205,6 +215,13 @@ class Console:
             self.log("The account list can only be changed while the automation is stopped.", "WARN")
             return
         self.accounts_window.open()
+
+
+    def on_config(self):
+        if self.state != IDLE:
+            self.log("The config can only be changed while the automation is stopped.", "WARN")
+            return
+        self.config_window.open()
 
 
     def on_pause(self):
