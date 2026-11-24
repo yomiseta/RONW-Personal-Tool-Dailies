@@ -3,3 +3,5 @@ __pycache__/
 settings.json
 Accounts.ini
 *.log
+Logs/
+daily_progress.json

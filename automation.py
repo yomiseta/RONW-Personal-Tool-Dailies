@@ -13,6 +13,8 @@ import actions
 import daily_goals
 import goals
 import launcher
+import logbook
+import progress
 import settings
 import winutil
 from errors import Halt, Stopped, StepFailed
@@ -24,16 +26,32 @@ MAX_FAILURES = 3       # failed passes in a row before the goal is abandoned
 
 class Automation:
     def __init__(self, log, set_action, on_done, launcher_path, area):
-        self.log = log                  # callable: log(message, level)
+        self._console_log = log         # callable: log(message, level)
+        self.log = self._log            # every log line also goes to the log file
         self.set_action = set_action    # callable: set_action(text)
         self.on_done = on_done          # called once when the job ends, whatever the reason
         self.launcher_path = launcher_path
         self.area = area                # (x, y, w, h) of the free space right of the console
+        self._logbook = logbook.LogFile()
         self._stop = threading.Event()
         self._resume = threading.Event()
         self._resume.set()
         self._thread = None
         self.action = actions.IDLE      # the current goal; the loops below run while it stays unchanged
+
+    # ----- logging -----
+    def _log(self, message, *level):
+        self._logbook.add(message)
+        self._console_log(message, *level)
+
+    def _save_log(self):
+        """Writes everything shown in the console during this run to the Logs folder."""
+        try:
+            path = self._logbook.save()
+            if path:
+                self._console_log(f"Log saved: Logs/{path.name}")
+        except OSError as err:
+            self._console_log(f"The log file could not be saved: {err}", "WARN")
 
     # ----- control, called from the GUI thread -----
     def start(self):
@@ -123,6 +141,7 @@ class Automation:
 
     # ----- the job itself -----
     def _run(self):
+        self._logbook = logbook.LogFile()   # a new log for every run
         try:
             self._workflow()
         except Stopped:
@@ -133,27 +152,49 @@ class Automation:
             self.log(f"Unexpected error: {type(err).__name__}: {str(err)[:200]}", "ERROR")
             traceback.print_exc()
         finally:
+            self._save_log()
             self.set_action(actions.IDLE)
             self.on_done()
 
-    def _workflow(self):
-        queue = accounts.enabled(settings.load())   # the checked accounts, in the order of the list
+    def _pending_accounts(self):
+        """The checked accounts that still have something to do today, in list order."""
+        queue = accounts.enabled(settings.load())
         if not queue:
             raise StepFailed("No account is checked. Open ACCOUNTS and tick at least one.")
-        self.log(f"Accounts to automate: {len(queue)}.")
+        pending = []
+        for acc in queue:
+            if progress.is_complete(acc.name):
+                self.log(f"{acc.name}: all daily activities are already done today. Skipped.")
+            else:
+                pending.append(acc)
+        return queue, pending
+
+    def _workflow(self):
+        queue, pending = self._pending_accounts()
+        if not pending:
+            self.log("Every checked account has finished its daily activities today. Nothing to do.", "OK")
+            return
+        self.log(f"Accounts to automate: {len(pending)} of {len(queue)} checked.")
         count = winutil.minimize_all(skip_pid=os.getpid())
         self.log(f"Minimized {count} window(s).")
         launcher.open_and_arrange(self, self.launcher_path)
-        for number, acc in enumerate(queue, 1):
-            self.log(f"Account {number} of {len(queue)}: {acc.name}")
+        for number, acc in enumerate(pending, 1):
+            self.log(f"Account {number} of {len(pending)}: {acc.name}")
             self.pursue(goals.LoginGoal(acc.name, acc.password))
-            daily = daily_goals.DailyState()
-            self.pursue(daily_goals.PeerArenaGoal(daily))
-            self.pursue(daily_goals.GuildGoal(daily))
+            daily = daily_goals.DailyState.load(acc.name)
+            if daily.peer_arena:
+                self.log("Peer Arena was already done today. Skipped.")
+            else:
+                self.pursue(daily_goals.PeerArenaGoal(daily))
+            if daily.guild:
+                self.log("Guild Dailies were already done today. Skipped.")
+            else:
+                self.pursue(daily_goals.GuildGoal(daily))
             # The next goals (mails, events, Quest Board) go here.
-            if number < len(queue):
+            if number < len(pending):
                 self._close_game()
-        self.log("Next goals (mails, events, Quest Board) are not built yet. Stopping here so you can test.", "OK")
+        self.log("All accounts finished the current automations. "
+                 "(Mails, events and Quest Board are not built yet.)", "OK")
 
     def _close_game(self):
         """Closes the game so the launcher can sign in the next account."""
