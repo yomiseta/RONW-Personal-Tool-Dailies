@@ -171,7 +171,7 @@ def wait_image(bot, hwnd, area, icon, what, threshold=0.7, ref_width=LOOT_REF_WI
     raise Halt(f"Stopped: the picture '{icon.name}' was not detected ({what}) after {TRIES} tries.")
 
 
-def wait_ratio(bot, hwnd, area, what, accept=None):
+def wait_ratio(bot, hwnd, area, what, accept=None, poll=POLL):
     """Reads a number pair such as 5/5 from an area, every half second, up to 10 times.
     Returns (first, second). `accept(first, second)` can reject a reading that is not the expected one yet."""
     for attempt in range(1, TRIES + 1):
@@ -183,7 +183,7 @@ def wait_ratio(bot, hwnd, area, what, accept=None):
                 return first, second
         if attempt < TRIES:
             clear_loot(bot, hwnd)
-            bot.sleep(POLL)
+            bot.sleep(poll)
     raise Halt(f"Stopped: the numbers ({what}) could not be read after {TRIES} tries.")
 
 
@@ -191,22 +191,18 @@ def wait_ratio(bot, hwnd, area, what, accept=None):
 def ensure_world(bot, hwnd):
     """Presses Esc until the game world is on screen. The screen is read before each press, so Esc is
     never pressed once the world is showing.
-    The HUD markers (Base, Job, Auto, Target List) are not always visible, for example right after
-    some quests. In that case Esc is the test: it closes whatever is on top, and when nothing is left
-    it opens the Game Menu. A Game Menu that opened and closed again means the world is clear."""
+    The world is recognised by the "UTC+" text and the inventory icon, the Game Menu by "Settings" or
+    "Casual". When the world's markers are hidden, Esc is the test: it closes whatever is on top, and
+    when nothing is left it opens the Game Menu. A menu that opened and closed means the world is clear."""
     menu_seen = False
     for _ in range(MAX_ESC):
-        _, words = scene.read_strip(bot, hwnd)
-        if scene.menu_open(words):
+        state = scene.screen_state(bot, hwnd)
+        if state == "world":
+            return
+        if state == "menu":
             menu_seen = True
             press_esc(bot, hwnd)       # the Game Menu is open: close it
-            bot.sleep(0.6)
-            continue
-        if scene.in_game(words):
-            bot.sleep(0.5)             # look once more before trusting it
-            _, words = scene.read_strip(bot, hwnd)
-            if scene.in_game(words) and not scene.menu_open(words):
-                return
+            bot.sleep(0.4)
             continue
         if menu_seen:
             # The menu has just closed and nothing else is on screen, so the world is clear.

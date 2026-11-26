@@ -21,6 +21,7 @@ CONFIRM_AREA = (0.378, 0.285, 0.604, 0.344)      # title of the "Start Commissio
 TRACKER_AREA = (0.022, 0.173, 0.158, 0.429)      # the quest widget in the game world
 QUESTS_TITLE_AREA = (0.04, 0.04, 0.18, 0.11)     # title of the Quests window
 GO_AREA = (0.681, 0.785, 0.752, 0.831)           # the Go button of the Quests window
+LIMIT_AREA = (0.200, 0.725, 0.800, 0.790)        # "You've reached today's participation limit..." line
 
 # The five quest cards. They are not used yet: they are for spotting rare rewards later.
 QUEST_AREAS = ((0.104, 0.267, 0.242, 0.511), (0.297, 0.275, 0.447, 0.498), (0.518, 0.282, 0.654, 0.511),
@@ -33,6 +34,7 @@ CONFIRM = (0.621, 0.688)       # Start Commission in the confirmation window
 QUEST_ICON = (0.064, 0.405)    # opens the Quests window from the game world
 DAILY_TAB = (0.062, 0.407)     # Daily tab of the Quests window
 QUEST_GO = (0.714, 0.809)      # Go button of the Quests window
+LIMIT_CLOSE = (0.500, 0.930)   # empty space below "Tap blank space to close"
 
 REFRESH_POINTS = ((0.222, 0.286), (0.432, 0.300), (0.638, 0.299), (0.318, 0.533), (0.494, 0.519))
 COLOR_POINTS = ((0.167, 0.336), (0.370, 0.329), (0.581, 0.343), (0.258, 0.575), (0.439, 0.570))
@@ -44,8 +46,11 @@ COLOR_RADIUS = 2               # the colour is the average of (2 * radius + 1) s
 
 # ----- timing and limits -----
 BOARD_WAITS = (15, 11, 5, 5)   # seconds waited before each look for the opened board
-REFRESH_SETTLE = 1.0           # seconds for the card animation after a refresh
+REFRESH_SETTLE = 0.5           # seconds for the card animation after a refresh
+REFRESH_POLL = 0.25            # seconds between looks at the attempts counter after clicking Refresh
+COLOR_RECHECK = 0.2            # seconds between two colour reads that must agree
 MAX_REFRESH = 30               # refreshes allowed in one run, as a safety limit
+LIMIT_AFTER = 60               # seconds after Start Commission before "You've reached" is looked for
 START_SETTLE = 3.0             # seconds after starting before the first look at the quest widget
 FIRST_LOOK_TRIES = 8           # the quest takes a moment to show in the widget: looks before giving up
 FIRST_LOOK_EVERY = 2.5         # seconds between those looks
@@ -64,11 +69,12 @@ MAX_CHECKS = 60                # looks at the quest widget before the bot gives 
 CLICK_MARKERS = ("Commemorative Photo",)
 
 
-# What the quest widget shows while a commission is running.
+# What the quest widget shows while a commission is running. A name ending with * is a stem: it
+# matches when the text only starts with it, because OCR misreads the rest of long names.
 MARKERS = ("Defeat", "Eliminate", "Repel", "Chase away", "Capture Hydras", "Exorcise", "Catch", "Pummel",
            "Provide spa", "Head to", "Commemorative Photo", "Order Member", "Wealthy Merchant", "Sorrowful",
            "Gang of Thieves", "Boastful Blacksmith", "Girl Group Audience", "Mage Couple",
-           "Assassin Guild Member", "Prontera Soldier", "Fishmonger", "Monster Enthusiast",
+           "Assass*", "Prontera Soldier", "Fishmonger", "Monster Enthusiast",
            "Little Bear Squad", "Gravekeeper", "Graveyard Notice", "Church Acolyte")
 
 
@@ -145,7 +151,7 @@ def _read_levels(bot, hwnd):
         if levels == previous:
             break
         previous = levels
-        bot.sleep(0.4)
+        bot.sleep(COLOR_RECHECK)
     text = ", ".join(f"{i + 1}={level or '?'}" for i, level in enumerate(levels))
     bot.log(f"Quest Board: reward levels {text}.")
     for i, level in enumerate(levels):
@@ -191,7 +197,7 @@ def _read_refresh(bot, hwnd):
 def _wait_refresh_used(bot, hwnd, before):
     """After clicking Refresh, waits until the free attempts drop below `before`."""
     for attempt in range(1, ingame.TRIES + 1):
-        bot.sleep(ingame.POLL)
+        bot.sleep(REFRESH_POLL)
         left = _peek_refresh(bot, hwnd)
         if left is not None and left < before:
             return left
@@ -201,6 +207,7 @@ def _wait_refresh_used(bot, hwnd, before):
 
 def _refresh_quests(bot, hwnd):
     """Refreshes blue quests until none is left, then purple ones, while free attempts remain."""
+    known_left = None   # the counter was already read while waiting for the last refresh to register
     for _ in range(MAX_REFRESH):
         ingame.begin(bot, hwnd, "Quest Board: checking the quests.")
         levels, _ = _read_levels(bot, hwnd)
@@ -208,13 +215,13 @@ def _refresh_quests(bot, hwnd):
         if target is None:
             bot.log("Quest Board: no quest is left to improve.")
             return
-        left = _read_refresh(bot, hwnd)
+        left = known_left if known_left is not None else _read_refresh(bot, hwnd)
         if left == 0:
             bot.log("Quest Board: no free refresh attempts left.")
             return
         bot.log(f"Quest Board: refreshing quest {target + 1} ({levels[target]}). Free attempts left: {left}.")
         ingame.click_fraction(bot, hwnd, REFRESH_POINTS[target], f"Refresh {target + 1}")
-        _wait_refresh_used(bot, hwnd, left)
+        known_left = _wait_refresh_used(bot, hwnd, left)
         bot.sleep(REFRESH_SETTLE)
     raise Halt(f"Stopped: {MAX_REFRESH} refreshes were made and the quests are still not settled.")
 
@@ -255,14 +262,29 @@ def _lines(words):
 
 
 def _fuzzy_find(text, key):
-    """Where in `text` a piece nearly equal to `key` starts, or -1. Allows a letter or two to be misread."""
-    best, best_at = 0.0, -1
+    """(start, length) of a piece of `text` nearly equal to `key`, or None. Allows a letter or two to be misread."""
+    best, found = 0.0, None
     for size in (len(key) - 1, len(key), len(key) + 1):
         for at in range(len(text) - size + 1):
             ratio = SequenceMatcher(None, text[at:at + size], key).ratio()
             if ratio > best:
-                best, best_at = ratio, at
-    return best_at if best >= FUZZY_RATIO else -1
+                best, found = ratio, (at, size)
+    return found if best >= FUZZY_RATIO else None
+
+
+def _whole_words(texts, owner, start, size, open_end=False):
+    """True when the match is not just part of a longer word. 'Catch' inside 'catching' is refused.
+    A match may start in the middle of a word only right after the tag 'Commission' (with up to two
+    stray characters between), because the widget prints '[Commission]Eliminate ...' and OCR often
+    glues the two together. With `open_end`, letters may follow the match (a stem such as 'Assass')."""
+    first, last = owner[start], owner[start + size - 1]
+    before = texts[first][:start - owner.index(first)]
+    after = texts[last][start + size - owner.index(last):]
+    if before:
+        tag = before.rfind("commission")
+        if tag < 0 or len(before) - tag - len("commission") > 2:
+            return False
+    return open_end or not after[:1].isalpha()
 
 
 def _marker_rect(words, marker):
@@ -270,21 +292,32 @@ def _marker_rect(words, marker):
     The widget wraps long quest names onto a second line, so the text of all lines is read as one
     flow, ignoring spaces and punctuation. The rectangle is that of the part on the first line."""
     key = vision.norm(marker)
+    open_end = marker.endswith("*")          # a stem such as "Assass*" may be followed by more letters
     ordered, line_of = [], []
     for number, line in enumerate(_lines(words)):
         ordered += line
         line_of += [number] * len(line)
     texts = [vision.norm(w.text) for w in ordered]
     joined = "".join(texts)
-    start = joined.find(key)
-    if start < 0 and len(key) >= FUZZY_MIN:
-        start = _fuzzy_find(joined, key)
-    if start < 0:
-        return None
     owner = []
     for index, text in enumerate(texts):
         owner += [index] * len(text)
-    used = sorted(set(owner[start:start + len(key)]))
+
+    match = None
+    at = joined.find(key)
+    while at >= 0:
+        if _whole_words(texts, owner, at, len(key), open_end):
+            match = (at, len(key))
+            break
+        at = joined.find(key, at + 1)
+    if match is None and len(key) >= FUZZY_MIN and not open_end:
+        fuzzy = _fuzzy_find(joined, key)
+        if fuzzy and _whole_words(texts, owner, *fuzzy):
+            match = fuzzy
+    if match is None:
+        return None
+    start, size = match
+    used = sorted(set(owner[start:start + size]))
     first_line = line_of[used[0]]
     part = [ordered[i] for i in used if line_of[i] == first_line]
     return (min(w.x for w in part), min(w.y for w in part),
@@ -317,7 +350,7 @@ def _click_marker(bot, hwnd, hit, seen_markers):
     if marker in CLICK_MARKERS:
         ingame.click_word(bot, hwnd, rect, f"Quest marker '{marker}'")
     elif not seen_markers or seen_markers[-1] != marker:
-        bot.log(f"Quest Board: the quest is '{marker}'. It is not clicked, so the quest keeps running.")
+        bot.log(f"Quest Board: the quest is '{marker}'.")
     seen_markers.append(marker)
 
 
@@ -346,6 +379,22 @@ def _recover(bot, hwnd):
     ingame.click_fraction(bot, hwnd, QUEST_GO, "Go")
 
 
+def _limit_reached(bot, hwnd, daily, board_started):
+    """From LIMIT_AFTER seconds after Start Commission on, looks for the "All commissions are completed"
+    screen ("You've reached today's participation limit"). When it shows, the Quest Board is done:
+    the screen is closed with a click on empty space. Returns True when it was found."""
+    if time.monotonic() - board_started < LIMIT_AFTER:
+        return False
+    text = vision.norm(" ".join(w.text for w in ingame.read_words(bot, hwnd, LIMIT_AREA)))
+    if "reached" not in text and "participation" not in text:
+        return False
+    bot.log("Quest Board: \"You've reached\" is showing, so all commissions are completed.")
+    ingame.click_fraction(bot, hwnd, LIMIT_CLOSE, "Close the rewards screen")
+    bot.sleep(1.0)
+    _finish(bot, hwnd, daily)
+    return True
+
+
 def _first_look(bot, hwnd):
     """The quest takes a moment to appear in the widget after starting. Looks every few seconds
     and returns the first marker found, or None when none appears."""
@@ -360,7 +409,7 @@ def _first_look(bot, hwnd):
     return None
 
 
-def _watch(bot, hwnd, daily, can_restart):
+def _watch(bot, hwnd, daily, can_restart, board_started):
     """Follows the running commission. Returns "done", or "restart" when the quest never began."""
     bot.sleep(START_SETTLE)
     ingame.ensure_world(bot, hwnd)
@@ -376,10 +425,12 @@ def _watch(bot, hwnd, daily, can_restart):
     seen_markers = []
     for check in range(1, MAX_CHECKS + 1):
         started = time.monotonic()
+        ingame.clear_loot(bot, hwnd)
+        if _limit_reached(bot, hwnd, daily, board_started):
+            return "done"
         if check == 1:
             hit = first
         else:
-            ingame.clear_loot(bot, hwnd)
             hit, seen = _look(bot, hwnd)
         if hit:
             _click_marker(bot, hwnd, hit, seen_markers)
@@ -388,6 +439,8 @@ def _watch(bot, hwnd, daily, can_restart):
                     f"Looking again in {VERIFY_EXTRA_WAIT} seconds.")
             bot.sleep(VERIFY_EXTRA_WAIT)
             ingame.clear_loot(bot, hwnd)
+            if _limit_reached(bot, hwnd, daily, board_started):
+                return "done"
             hit, seen = _look(bot, hwnd)
             if hit:
                 _click_marker(bot, hwnd, hit, seen_markers)
@@ -416,7 +469,8 @@ def run(bot, hwnd, daily):
         _wait_for_board(bot, hwnd)
         _refresh_quests(bot, hwnd)
         _start_commission(bot, hwnd)
+        board_started = time.monotonic()
 
-        if _watch(bot, hwnd, daily, can_restart=(round_number == 1)) == "done":
+        if _watch(bot, hwnd, daily, (round_number == 1), board_started) == "done":
             return
         ingame.ensure_world(bot, hwnd)   # back to the game world before the flow is repeated

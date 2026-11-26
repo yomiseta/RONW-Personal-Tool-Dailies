@@ -279,9 +279,10 @@ def _character_select(bot, hwnd, st):
 
 
 # ----- game world -----
-def _game_world(bot, hwnd, rect, words, st):
-    """Closes the welcome pop-ups, then makes sure the Game Menu is not left open."""
-    if scene.menu_open(words):
+def _game_world(bot, hwnd, state, st):
+    """Closes the welcome pop-ups, then makes sure the Game Menu is not left open.
+    `state` is "menu" or "world", as read by scene.screen_state."""
+    if state == "menu":
         if st.menu_close_tries >= MAX_MENU_CLOSE:
             raise StepFailed("The Game Menu would not close.")
         st.menu_close_tries += 1
@@ -289,6 +290,7 @@ def _game_world(bot, hwnd, rect, words, st):
         _press_escape(bot, hwnd)
         return
 
+    rect = winutil.get_rect(hwnd)
     popup = _find_popup_x(bot, rect) if st.popups_closed < MAX_POPUPS else None
     if popup:
         winutil.activate(hwnd)
@@ -306,12 +308,15 @@ def _game_world(bot, hwnd, rect, words, st):
         # later before acting, in case a pop-up is still sliding in.
         st.world_stable = True
         bot.sleep(WORLD_RECHECK)
+        # The reward window (Congrats) can sit over the world, and only a click closes it.
+        strip_rect, strip_words = scene.read_strip(bot, hwnd)
+        _close_reward_popup(bot, hwnd, strip_rect, strip_words, st)
         return
 
     if st.menu_seen:
         # The menu was opened and closed again and nothing else is on screen: the world is clear.
         st.ready = True
-        bot.log(f"The game world is ready ({scene.in_game_detail(words)}).", "OK")
+        bot.log("The game world is ready.", "OK")
         return
 
     # Escape closes whatever is on top. When nothing is left to close it opens the Game Menu,
@@ -371,26 +376,27 @@ def advance(bot, hwnd, st):
     if not st.use_strip and _title_screens(bot, hwnd, st):
         return
 
-    # Quick read of the bottom strip, used once the game has got past the title screen.
     if st.use_strip:
+        # The game world and the Game Menu are told apart by two tiny reads, which is the quickest look.
+        state = scene.screen_state(bot, hwnd)
+        if state:
+            st.fast_misses = st.unknown_count = 0
+            return _game_world(bot, hwnd, state, st)
+        loading = (st.continue_clicked_at is not None and
+                   time.monotonic() - st.continue_clicked_at < LOAD_TIMEOUT)
+        if loading and st.fast_misses < FAST_MISS_LIMIT:
+            st.fast_misses += 1
+            bot.sleep(0.5)   # still loading: look again soon
+            return
+        st.fast_misses = 0   # nothing familiar for a while: read the bottom strip and the whole window below
         rect, words = scene.read_strip(bot, hwnd)
         if _close_reward_popup(bot, hwnd, rect, words, st):
             return
         if _cancel_dialog(bot, hwnd, words):
             return
         if _continue_button(words):
-            st.fast_misses = st.unknown_count = 0
+            st.unknown_count = 0
             return _character_select(bot, hwnd, st)
-        if scene.menu_open(words) or scene.in_game(words):
-            st.fast_misses = st.unknown_count = 0
-            return _game_world(bot, hwnd, rect, words, st)
-        loading = (st.continue_clicked_at is not None and
-                   time.monotonic() - st.continue_clicked_at < LOAD_TIMEOUT)
-        if loading and st.fast_misses < FAST_MISS_LIMIT:
-            st.fast_misses += 1
-            bot.sleep(1.0)   # nothing new yet: look again in one second
-            return
-        st.fast_misses = 0   # nothing familiar for a while: do one full read below
 
     # Full read of the whole window.
     rect, words = scene.read(bot, hwnd)
@@ -414,10 +420,11 @@ def advance(bot, hwnd, st):
         return
 
     # The Game Menu covers the HUD markers, so it has to be checked before the HUD itself.
-    if scene.menu_open(words) or scene.in_game(words):
+    state = scene.screen_state(bot, hwnd)
+    if state:
         st.use_strip = True
         st.unknown_count = 0
-        return _game_world(bot, hwnd, rect, words, st)
+        return _game_world(bot, hwnd, state, st)
 
     # Loading or unknown screen.
     loading = (st.continue_clicked_at is not None and
