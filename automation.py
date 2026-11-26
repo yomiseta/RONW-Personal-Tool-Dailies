@@ -194,23 +194,16 @@ class Automation:
             self.log(f"Account {number} of {len(pending)}: {acc.name}")
             self.pursue(goals.LoginGoal(acc.name, acc.password))
             daily = daily_goals.DailyState.load(acc.name)
-            if daily.peer_arena:
-                self.log("Peer Arena was already done today. Skipped.")
-            else:
-                self.pursue(daily_goals.PeerArenaGoal(daily))
-            if daily.guild:
-                self.log("Guild Dailies were already done today. Skipped.")
-            else:
-                self.pursue(daily_goals.GuildGoal(daily))
-            if daily.quest_board:
-                self.log("Quest Board was already done today. Skipped.")
-            else:
-                self.pursue(daily_goals.QuestBoardGoal(daily))
-            # The next goals (mails, events, Monster Extermination) go here.
+            for key, goal_class, label in daily_goals.ORDER:
+                if getattr(daily, key):
+                    self.log(f"{label} was already done today. Skipped.")
+                else:
+                    self.pursue(goal_class(daily))
+            # The next goals (Monster Extermination) go here.
             if number < len(pending):
                 self._close_game("Closing the game for the next account...")
         self.log("All accounts finished the current automations. "
-                 "(Mails, events and Monster Extermination are not built yet.)", "OK")
+                 "(Monster Extermination is not built yet.", "OK")
 
     def _close_game(self, message):
         """Closes the game. It is asked to close first, like the window's close button;
